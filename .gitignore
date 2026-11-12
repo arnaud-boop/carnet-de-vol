@@ -1,0 +1,3 @@
+# Fichiers locaux de test, a ne pas publier
+.claude/
+.DS_Store
