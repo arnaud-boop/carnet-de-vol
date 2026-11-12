@@ -25,8 +25,9 @@ const otherCarnet = () => (carnet === 'liv' ? 'arnaud' : 'liv');
 
 let cfg = null;
 let flights = [];
-let routes = [];                      // history without dates: { from, to, count, distKm, ab, abEst } (Arnaud)
+let routes = [];                      // history without dates: { from, to, count, distKm, ab, abEst, airline, airlineEst } (Arnaud)
                                       // ab: flights from -> to (the others go to -> from); abEst: that split is an estimate
+                                      // airline: deduced from the airlines per airport; airlineEst: only probable
 let airlinesList = [];                // airlines of the history, without counts
 let airportAirlines = {};             // history: airport code -> airlines taken there
 let historyUntil = '';                // last day covered by the history (YYYY-MM-DD)
@@ -224,6 +225,8 @@ function applyDoc(doc) {
       count: Math.max(0, Math.round(+r?.count || 0)), distKm: Math.max(0, Math.round(+r?.distKm || 0))
     };
     if (Number.isInteger(r?.ab) && r.ab >= 0 && r.ab <= x.count) { x.ab = r.ab; if (r.abEst) x.abEst = true; }
+    const al = String(r?.airline || '').trim();
+    if (al) { x.airline = al; if (r.airlineEst) x.airlineEst = true; }
     return x;
   }).filter(r => /^[A-Z0-9]{3,4}$/.test(r.from) && /^[A-Z0-9]{3,4}$/.test(r.to) && r.count > 0);
   airlinesList = (Array.isArray(obj.airlines) ? obj.airlines : []).map(s => String(s || '').trim()).filter(Boolean);
@@ -274,18 +277,24 @@ function legMap(list, withHistory) {
     if (!a || !b) return;
     if (a === b) nab = n;   // local flights: they leave and come back
     const k = routeKey(a, b);
-    const x = m[k] = m[k] || { key: k, a: k.split('-')[0], b: k.split('-')[1], n: 0, km: 0, flights: 0, ab: 0, ba: 0, unk: 0, est: false };
+    const x = m[k] = m[k] || { key: k, a: k.split('-')[0], b: k.split('-')[1], n: 0, km: 0, flights: 0, ab: 0, ba: 0, unk: 0, est: false, al: {} };
     x.n += n;
     if (nab == null) x.unk += n;
     else if (a === x.a) { x.ab += nab; x.ba += n - nab; } else { x.ba += nab; x.ab += n - nab; }
     if (est) x.est = true;
     if (km && !x.km) x.km = km;
   };
-  if (withHistory) routes.forEach(r => add(r.from, r.to, r.count, r.distKm, r.ab ?? null, r.abEst));
+  // al: airline -> { n, est } (est: deduced from the history and only probable)
+  const addAl = (x, name, n, est) => { const y = x.al[name] = x.al[name] || { n: 0, est: false }; y.n += n; if (est) y.est = true; };
+  if (withHistory) routes.forEach(r => {
+    add(r.from, r.to, r.count, r.distKm, r.ab ?? null, r.abEst);
+    if (r.airline) addAl(m[routeKey(r.from, r.to)], r.airline, r.count, r.airlineEst);
+  });
   list.forEach(f => {
     add(f.from, f.to, 1, f.distKm || getDistance(f.from, f.to), 1);
     const x = m[routeKey(f.from, f.to)];
     if (x) x.flights++;   // detailed flights on this route
+    if (x && f.airline) addAl(x, f.airline, 1, false);
   });
   return m;
 }
@@ -1148,6 +1157,7 @@ const ROUTE_SORTS = {
   code: { label: 'A → Z', val: null }
 };
 let routeSort = 'count';
+let airlineSort = 'flights';   // statistics of a logbook with a history: airlines ranked by 'flights' or by 'airports'
 
 function routeRow(l) {
   const loop = l.a === l.b;
@@ -1856,6 +1866,19 @@ function showAirportPanelHistory(code, ap, list) {
   loadAirportPhoto(code);
 }
 
+// Airlines of a pair of airports, history included: known, deduced, or unknown
+function routeAirlinesNote(leg) {
+  if (!leg) return '';
+  const list = Object.entries(leg.al).sort((p, q) => q[1].n - p[1].n);
+  if (!list.length) return '';
+  const known = list.reduce((s, [, v]) => s + v.n, 0);
+  const est = list.some(([, v]) => v.est);
+  const names = list.map(([name, v]) => list.length > 1 || known < leg.n ? `${esc(name)} ×${v.n}` : esc(name)).join(', ');
+  const fromHist = routes.some(r => routeKey(r.from, r.to) === leg.key && r.airline);
+  const why = !fromHist ? '' : est ? ' (probable : seule compagnie commune aux deux aéroports dans l\'Excel)' : ' (déduite de l\'Excel : la seule possible)';
+  return `<div class="mp-note">${list.length > 1 ? 'Compagnies' : 'Compagnie'} : ${names}${why}.${known < leg.n ? ` Inconnue pour ${plural(leg.n - known, 'vol', 'vols')}.` : ''}</div>`;
+}
+
 // ─── Airport photo: the main image of the airport on Wikidata, served by Wikimedia Commons ───
 const airportPhotoCache = new Map();   // IATA code -> Promise of { src, page, credit } or null
 
@@ -1938,7 +1961,7 @@ function showRoutePanel(key) {
       </div>
       <div class="mp-note">${hist ? `${plural(hist, 'vol', 'vols')} dans l'historique, sans date. ` : ''}Durée ${avg ? 'moyenne' : 'estimée'} : ${avg ? fmtDur(avg) : fmtDur(Math.round(estFlightMin(km)))}${avg ? ' (vols saisis)' : ' (d\'après la distance)'}.</div>
       ${dir && a !== b ? `<div class="mp-note">${leg.n > 1 ? 'Toujours' : 'Vol'} dans le sens ${esc(x)} → ${esc(y)}.</div>` : split}
-      ${airlines.length ? `<div class="mp-note">${esc(airlines.join(', '))}</div>` : ''}
+      ${routeAirlinesNote(leg)}
       ${list.length ? `<div class="mp-label">Vols saisis</div>${flightRows(list)}` : ''}`, { type: 'route', key });
     return;
   }
@@ -2231,7 +2254,13 @@ function renderAnalyticsHistory(container) {
   Object.entries(airportAirlines).forEach(([c, list]) => list.forEach(a => addAl(a, c)));
   flights.forEach(f => { if (f.airline) { addAl(f.airline, f.from); addAl(f.airline, f.to); } });
   airlinesList.forEach(a => { alAirports[a] = alAirports[a] || new Set(); });
-  const topAirlines = Object.entries(alAirports).map(([a, set]) => [a, set.size]).sort((x, y) => y[1] - x[1] || x[0].localeCompare(y[0], 'fr'));
+  // ... and how many flights each one made: detailed flights plus the routes whose airline is deduced
+  const alFlights = {};
+  legs.forEach(l => Object.entries(l.al).forEach(([a, v]) => { alFlights[a] = (alFlights[a] || 0) + v.n; }));
+  const withAl = Object.values(alFlights).reduce((s, n) => s + n, 0);
+  const byFlights = airlineSort === 'flights';
+  const topAirlines = Object.entries(alAirports).map(([a, set]) => [a, byFlights ? alFlights[a] || 0 : set.size])
+    .filter(([, n]) => !byFlights || n).sort((x, y) => y[1] - x[1] || x[0].localeCompare(y[0], 'fr'));
   const rankCard = (id, title, sub) => `<section class="st-card"><div class="st-card-head"><h2>${title}</h2><span>${sub}</span></div><ol class="top-list" id="${id}"></ol></section>`;
 
   container.innerHTML = `
@@ -2267,7 +2296,14 @@ function renderAnalyticsHistory(container) {
       ${rankCard('top-airports', 'Aéroports', 'passages')}
       ${rankCard('top-routes', 'Trajets', 'vols, aller et retour')}
       ${rankCard('top-countries', 'Pays', 'passages dans les aéroports')}
-      ${rankCard('top-airlines', 'Compagnies', `${topAirlines.length} différentes · aéroports`)}
+      <section class="st-card"><div class="st-card-head"><h2>Compagnies</h2><span>${Object.keys(alAirports).length} différentes</span></div>
+        <div class="pills" role="group" aria-label="Classer les compagnies">${[['flights', 'Par vols'], ['airports', 'Par aéroports']].map(([k, label]) =>
+          `<button type="button" class="pill${k === airlineSort ? ' on' : ''}" data-airline-sort="${k}" aria-pressed="${k === airlineSort}">${label}</button>`).join('')}</div>
+        <ol class="top-list" id="top-airlines"></ol>
+        <p class="muted" style="font-size:12px;margin-top:10px">${byFlights
+          ? `Compagnie connue pour ${fmtInt(withAl)} vols sur ${fmtInt(T.n)} : saisie, ou déduite des compagnies de chaque aéroport dans l'Excel. Les autres trajets avaient plusieurs compagnies possibles.`
+          : `Nombre d'aéroports où vous avez pris ou quitté chaque compagnie.`}</p>
+      </section>
     </div>
     <p class="muted" style="font-size:12px;margin-top:16px">Les années, les mois, les sièges et les avions demandent des vols datés. Ils apparaîtront avec les vols saisis en détail.</p>`;
 
@@ -2285,7 +2321,6 @@ function renderAnalyticsHistory(container) {
   $('top-airlines').innerHTML = topAirlines.map(([a, n], i) => `<li>
       <span class="rank">${i + 1}</span><span class="rk-name rk-main">${esc(a)}</span>
       ${bar(n, topAirlines[0][1] || 1, 'var(--accent2)')}<span class="count">${n}</span></li>`).join('');
-  $('top-airlines').insertAdjacentHTML('afterend', `<p class="muted" style="font-size:12px;margin-top:10px">Nombre d'aéroports où vous avez pris ou quitté chaque compagnie. L'historique ne dit pas quelle compagnie a fait quel vol.</p>`);
   ['top-airports', 'top-routes', 'top-countries', 'top-airlines'].forEach(id => addShowMore(id, 8));
 }
 
@@ -3108,6 +3143,8 @@ $('view-map').addEventListener('click', e => {
 $('charts-container').addEventListener('click', e => {
   const b = e.target.closest('[data-year-mode]');
   if (b && b.dataset.yearMode !== yearMode) { yearMode = b.dataset.yearMode; renderAnalytics(); }
+  const al = e.target.closest('[data-airline-sort]');
+  if (al && al.dataset.airlineSort !== airlineSort) { airlineSort = al.dataset.airlineSort; renderAnalytics(); }
 });
 $('flights-table').addEventListener('click', e => {
   const sort = e.target.closest('[data-route-sort]');

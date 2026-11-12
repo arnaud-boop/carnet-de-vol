@@ -13,7 +13,9 @@ Deux carnets dans le meme depot de donnees, avec la meme cle :
   l'historique importe de son fichier Excel (`routes` : trajets avec un nombre
   de vols, sans dates, jusqu'a `historyUntil`). Pour chaque trajet, `ab` donne
   le nombre de vols dans le sens `from` vers `to` (`abEst` : repartition estimee).
-  `airportAirlines` donne les compagnies prises dans chaque aeroport.
+  `airportAirlines` donne les compagnies prises dans chaque aeroport. `airline`
+  donne la compagnie d'un trajet quand elle se deduit de ces listes
+  (`airlineEst` : seulement probable).
 
 Le bouton Liv / Arnaud en haut de la page change de carnet. Chaque appareil
 retient le dernier carnet ouvert. Les adresses `#liv` et `#arnaud` ouvrent
