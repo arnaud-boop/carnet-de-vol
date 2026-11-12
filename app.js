@@ -292,13 +292,18 @@ function legMap(list, withHistory) {
 const allLegs = () => Object.values(legMap(flights, true));
 // Direction of a pair of airports: 'ab' or 'ba' when every flight went the same way, '' otherwise
 const legDir = l => l.a === l.b || l.unk ? '' : !l.ba ? 'ab' : !l.ab ? 'ba' : '';
-// Totals of the whole logbook. Hours: the real duration when known, else distance ÷ 750 km/h (as in Arnaud's Excel).
+// Flight time (take-off to landing, in minutes) estimated from the distance. Calibrated on Liv's 60 flights timed
+// on Flightradar24: cruise at 820 km/h, plus up to 17.5 min for the climb and the descent (less on very short flights).
+const estFlightMin = km => km > 0 ? km / 820 * 60 + 17.5 * (1 - Math.exp(-km / 150)) : 0;
+const EST_RULE = 'distance ÷ 820 km/h, plus jusqu\'à 17 min 30 pour la montée et la descente (moins sur les vols très courts)';
+
+// Totals of the whole logbook. Hours: the real duration when known, else estimated from the distance (history only).
 function logTotals() {
   const legs = allLegs();
   const n = legs.reduce((s, l) => s + l.n, 0);
   const km = routes.reduce((s, r) => s + r.count * r.distKm, 0) + flights.reduce((s, f) => s + (f.distKm || 0), 0);
-  const estMin = routes.reduce((s, r) => s + r.count * r.distKm / 750 * 60, 0)
-    + flights.reduce((s, f) => s + (f.durationMin || (f.distKm || 0) / 750 * 60 * (hasHistory() ? 1 : 0)), 0);
+  const estMin = routes.reduce((s, r) => s + r.count * estFlightMin(r.distKm), 0)
+    + flights.reduce((s, f) => s + (f.durationMin || (hasHistory() ? estFlightMin(f.distKm || 0) : 0)), 0);
   const co2 = routes.reduce((s, r) => s + r.count * calcCO2(r.distKm, 'economy'), 0) + flights.reduce((s, f) => s + co2Of(f), 0);
   return { legs, n, km, mins: estMin, co2 };
 }
@@ -840,7 +845,7 @@ function renderPassport() {
 }
 
 // Passport of a logbook with a history (Arnaud): the history has routes and counts, no dates.
-// Hours are estimated from the distance, like in Arnaud's Excel.
+// Hours are estimated from the distance (see estFlightMin).
 function renderPassportHistory(el, { info, T, hours, airports, nCountries, home, last, label }) {
   const km = T.km;
   const legs = T.legs.filter(l => l.a !== l.b);   // loops (local flights) have no route on the map
@@ -894,7 +899,7 @@ function renderPassportHistory(el, { info, T, hours, airports, nCountries, home,
     <h2 class="sec-title">Tableau des records</h2>
     <div class="board">
       <div class="board-head"><span>Records</span><span>Valeur</span><span>Détail</span></div>
-      ${row('Heures en vol', fmtInt(hours), `estimées (distance ÷ 750 km/h), soit ${(mins2days(T.mins))} jours`, 'showDurationPopup()')}
+      ${row('Heures en vol', fmtInt(hours), `estimées d'après la distance, soit ${(mins2days(T.mins))} jours`, 'showDurationPopup()')}
       ${longest ? row('Trajet le plus long', `${longest.a}-${longest.b}`, `${fmtInt(longest.km)} km · ${esc(city(longest.a))} ↔ ${esc(city(longest.b))} · ${plural(longest.n, 'vol', 'vols')}`, `openRouteOnMap('${longest.key}')`) : ''}
       ${frequent ? row('Trajet favori', `${frequent.a}-${frequent.b}`, `${plural(frequent.n, 'vol', 'vols')} · ${esc(city(frequent.a))} ↔ ${esc(city(frequent.b))}`, `openRouteOnMap('${frequent.key}')`) : ''}
       ${home ? row('Aéroport principal', home, `${fmtInt(passages[home])} passages · ${esc(city(home))}`, `openAirportOnMap('${home}')`) : ''}
@@ -1074,7 +1079,8 @@ function showCO2Popup() {
 
 function showDurationPopup() {
   if (hasHistory()) {
-    showLegsPopup('⏱️ Trajets par heures en vol (total)', l => l.n * l.km, l => `${fmtInt(l.n * l.km / 750)} h`, 'Heures estimées : distance ÷ 750 km/h, comme dans le fichier Excel.');
+    showLegsPopup('⏱️ Trajets par heures en vol (total)', l => l.n * estFlightMin(l.km), l => `${fmtInt(l.n * estFlightMin(l.km) / 60)} h`,
+      `Heures du décollage à l'atterrissage, estimées d'après la distance : ${EST_RULE}. Règle calée sur les vols de Liv chronométrés sur Flightradar24.`);
     return;
   }
   if (!flights.length) return;
@@ -1930,7 +1936,7 @@ function showRoutePanel(key) {
         <div><b>${fmtInt(km)}</b><span>km par vol</span></div>
         <div><b>${fmtInt(km * total)}</b><span>km en tout</span></div>
       </div>
-      <div class="mp-note">${hist ? `${plural(hist, 'vol', 'vols')} dans l'historique, sans date. ` : ''}Durée estimée : ${avg ? fmtDur(avg) : fmtDur(Math.round(km / 750 * 60))}${avg ? ' (moyenne des vols saisis)' : ' (distance ÷ 750 km/h)'}.</div>
+      <div class="mp-note">${hist ? `${plural(hist, 'vol', 'vols')} dans l'historique, sans date. ` : ''}Durée ${avg ? 'moyenne' : 'estimée'} : ${avg ? fmtDur(avg) : fmtDur(Math.round(estFlightMin(km)))}${avg ? ' (vols saisis)' : ' (d\'après la distance)'}.</div>
       ${dir && a !== b ? `<div class="mp-note">${leg.n > 1 ? 'Toujours' : 'Vol'} dans le sens ${esc(x)} → ${esc(y)}.</div>` : split}
       ${airlines.length ? `<div class="mp-note">${esc(airlines.join(', '))}</div>` : ''}
       ${list.length ? `<div class="mp-label">Vols saisis</div>${flightRows(list)}` : ''}`, { type: 'route', key });
