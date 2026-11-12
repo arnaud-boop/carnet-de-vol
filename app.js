@@ -1194,6 +1194,7 @@ function openModal(id) {
   ['from-code', 'to-code'].forEach(i => { $(i).value = ''; });
   ['from-list', 'to-list'].forEach(i => $(i).classList.remove('open'));
   setHint('duration-hint', ''); setHint('reg-status', ''); setHint('date-hint', '');
+  setHint('fn-status', ''); clearTimeout(fnTimer); fnFound = null;
   $('flight-date').removeAttribute('min');
   $('remove-photo').value = '0';
   $('photo-preview').innerHTML = '';
@@ -1330,7 +1331,7 @@ async function saveFlight(e) {
     arrivalDate: $('arrival-date').value,
     arrivalTime: $('arrival-time').value,
     durationMin,
-    airline: $('airline').value, flightNumber: $('flight-number').value, cabinClass,
+    airline: $('airline').value, flightNumber: normFlightNumber($('flight-number').value), cabinClass,
     registration: $('registration').value, aircraftType: $('aircraft-type').value,
     seat: $('seat').value.toUpperCase(), coTravelers: $('co-travelers').value, notes: $('notes').value,
     distKm: dist, co2kg: calcCO2(dist, cabinClass)
@@ -1527,6 +1528,78 @@ const TYPE_NAMES = {
   AT72: 'ATR 72', AT75: 'ATR 72-500', AT76: 'ATR 72-600', AT45: 'ATR 42-500', AT46: 'ATR 42-600',
   DH8D: 'De Havilland Dash 8-400', CRJ9: 'Bombardier CRJ900', CRJX: 'Bombardier CRJ1000'
 };
+
+// ═══════════════════════════════════════
+//  ROUTE FROM FLIGHT NUMBER
+// ═══════════════════════════════════════
+// adsbdb.com gives the route a flight number flies today. It fills only
+// empty fields: an old flight may have used another route.
+let fnTimer = null, fnFound = null;
+
+function normFlightNumber(v) { return String(v || '').toUpperCase().replace(/\s+/g, ''); }
+
+// Airline name as already written in the logbook for the same code (SK -> "SAS")
+function airlineForCode(fn) {
+  const code = fn.slice(0, 2), counts = {};
+  flights.forEach(f => { if (f.airline && normFlightNumber(f.flightNumber).slice(0, 2) === code) counts[f.airline] = (counts[f.airline] || 0) + 1; });
+  return Object.keys(counts).sort((a, b) => counts[b] - counts[a])[0] || '';
+}
+
+function onFlightNumberInput() {
+  clearTimeout(fnTimer);
+  fnFound = null;
+  const fn = normFlightNumber($('flight-number').value);
+  if (!/^[A-Z0-9]{2}\d{1,4}[A-Z]?$/.test(fn)) { setHint('fn-status', ''); return; }
+  setHint('fn-status', '🔍 Recherche de la ligne…', 'loading');
+  fnTimer = setTimeout(() => lookupFlightNumber(fn), 800);
+}
+
+async function lookupFlightNumber(fn) {
+  const current = () => normFlightNumber($('flight-number').value) === fn && $('flight-modal').classList.contains('open');
+  let route = null;
+  try {
+    const r = await fetch(`https://api.adsbdb.com/v0/callsign/${encodeURIComponent(fn)}`);
+    if (r.ok) route = (await r.json())?.response?.flightroute || null;
+  } catch (e) {
+    if (current()) setHint('fn-status', 'Service de recherche indisponible. Remplissez les champs à la main.');
+    return;
+  }
+  if (!current()) return;
+  const o = route?.origin, d = route?.destination;
+  if (!o?.iata_code || !d?.iata_code) { setHint('fn-status', 'Ligne non trouvée pour ce numéro. Remplissez les champs à la main.'); return; }
+
+  // Airports not in the built-in list are added from the answer; their time zone is looked up afterwards
+  [o, d].forEach(a => {
+    const code = String(a.iata_code).toUpperCase();
+    if (!/^[A-Z0-9]{3}$/.test(code) || AIRPORTS[code] || !Number.isFinite(+a.latitude) || !Number.isFinite(+a.longitude)) return;
+    AIRPORTS[code] = { name: String(a.name || code), city: String(a.municipality || a.name || code), country: String(a.country_iso_name || ''), lat: +(+a.latitude).toFixed(4), lon: +(+a.longitude).toFixed(4), tz: null };
+  });
+  const from = String(o.iata_code).toUpperCase(), to = String(d.iata_code).toUpperCase();
+  const airline = airlineForCode(fn) || String(route.airline?.name || '');
+  fnFound = { from, to, airline };
+
+  const filled = [];
+  if (!$('from-code').value && AIRPORTS[from]) { selectAirport('from', from); filled.push('départ'); }
+  if (!$('to-code').value && AIRPORTS[to]) { selectAirport('to', to); filled.push('arrivée'); }
+  if (!$('airline').value.trim() && airline) { $('airline').value = airline; filled.push('compagnie'); }
+
+  const sameRoute = $('from-code').value === from && $('to-code').value === to;
+  if (sameRoute) {
+    setHint('fn-status', `✓ ${from} → ${to}${airline ? ' · ' + airline : ''}${filled.length ? ' (rempli : ' + filled.join(', ') + ')' : ''}`, 'green');
+  } else {
+    // Another route is already written: never replace it without asking
+    const el = $('fn-status');
+    el.className = 'form-hint';
+    el.innerHTML = `Aujourd'hui, ${esc(fn)} relie ${esc(from)} → ${esc(to)}. C'était peut-être une autre ligne à l'époque. <a href="#" onclick="useFoundRoute();return false" style="color:var(--accent2)">Utiliser ${esc(from)} → ${esc(to)}</a>`;
+  }
+}
+
+function useFoundRoute() {
+  if (!fnFound) return;
+  selectAirport('from', fnFound.from);
+  selectAirport('to', fnFound.to);
+  setHint('fn-status', `✓ ${fnFound.from} → ${fnFound.to}`, 'green');
+}
 
 let regTimer = null, foundType = '';
 
