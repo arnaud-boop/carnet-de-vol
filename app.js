@@ -806,103 +806,243 @@ function greatCirclePoints(lat1, lon1, lat2, lon2, n = 80) {
   return pts;
 }
 
-function getAirportStats(code) {
-  const deps = flights.filter(f => f.from === code), arrs = flights.filter(f => f.to === code);
-  return {
-    deps: deps.length, arrs: arrs.length, total: deps.length + arrs.length,
-    dests: [...new Set(deps.map(f => f.to).filter(Boolean))],
-    origins: [...new Set(arrs.map(f => f.from).filter(Boolean))],
-    airlines: [...new Set([...deps, ...arrs].map(f => f.airline).filter(Boolean))]
-  };
+// The background map is drawn from country outlines shipped with the site (world.js).
+// No map provider, no key, and it works offline.
+let countryLayers = null;      // country code -> list of Leaflet polygons
+let routeLayers = {}, markerLayers = {};
+let fittedFor = '';            // airports the map was last framed on
+let mapSelection = null;       // { type: 'airport', code } or { type: 'route', key }
+
+const cssVar = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const routeKey = (a, b) => [a, b].sort().join('-');
+const plural = (n, one, many) => `${n} ${n > 1 ? many : one}`;
+
+function decodeRings(rings) {
+  return rings.map(r => {
+    const pts = [];
+    let x = 0, y = 0;
+    for (let i = 0; i < r.length; i += 2) { x += r[i]; y += r[i + 1]; pts.push([y / 100, x / 100]); }
+    return [pts];
+  });
+}
+
+function initMap() {
+  leafletMap = L.map('map', { center: [45, 10], zoom: 3, minZoom: 1, maxZoom: 8, zoomSnap: 0.25, worldCopyJump: false });
+  leafletMap.attributionControl.setPrefix('<a href="https://leafletjs.com" target="_blank" rel="noopener">Leaflet</a>');
+  leafletMap.attributionControl.addAttribution('Fond : <a href="https://www.naturalearthdata.com" target="_blank" rel="noopener">Natural Earth</a>');
+
+  countryLayers = {};
+  if (typeof WORLD !== 'undefined') {
+    const renderer = L.canvas({ padding: 0.5 });
+    const style = { renderer, interactive: false, weight: 0.6, color: cssVar('--land-line'), fillColor: cssVar('--land'), fillOpacity: 1 };
+    WORLD.countries.forEach(c => {
+      const poly = L.polygon(decodeRings(c.r), style).addTo(leafletMap);
+      if (c.c) (countryLayers[c.c] = countryLayers[c.c] || []).push(poly);
+    });
+  }
+
+  // "Show all" button under the zoom buttons
+  const Fit = L.Control.extend({
+    options: { position: 'topleft' },
+    onAdd() {
+      const box = L.DomUtil.create('div', 'leaflet-bar');
+      const a = L.DomUtil.create('a', 'map-fit', box);
+      a.href = '#'; a.title = 'Voir tous les vols'; a.setAttribute('aria-label', 'Voir tous les vols'); a.textContent = '⤢';
+      L.DomEvent.on(a, 'click', e => { L.DomEvent.preventDefault(e); fitMap(true); });
+      L.DomEvent.disableClickPropagation(box);
+      return box;
+    }
+  });
+  new Fit().addTo(leafletMap);
+  leafletMap.on('click', closeMapPanel);
+}
+
+function usedAirports() {
+  return [...new Set(flights.flatMap(f => [f.from, f.to]))].filter(c => AIRPORTS[c]);
+}
+
+function fitMap(force) {
+  const codes = usedAirports();
+  const key = codes.sort().join(',');
+  if (!force && key === fittedFor) return;
+  fittedFor = key;
+  if (!codes.length) { leafletMap.setView([45, 10], 3); return; }
+  if (codes.length === 1) { const a = AIRPORTS[codes[0]]; leafletMap.setView([a.lat, a.lon], 5); return; }
+  const wide = window.innerWidth > 768 && !$('map-panel').hidden;
+  leafletMap.fitBounds(L.latLngBounds(codes.map(c => [AIRPORTS[c].lat, AIRPORTS[c].lon])), {
+    paddingTopLeft: [40, 40], paddingBottomRight: [wide ? 360 : 40, 40], maxZoom: 6
+  });
 }
 
 function renderMap() {
   if (typeof L === 'undefined') { $('map').innerHTML = '<div class="empty-state"><p>La carte ne se charge pas. Vérifiez la connexion internet.</p></div>'; return; }
-  if (!leafletMap) {
-    leafletMap = L.map('map', { center: [35, 15], zoom: 2, worldCopyJump: true });
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-      attribution: '© OpenStreetMap © CARTO', subdomains: 'abcd', maxZoom: 19
-    }).addTo(leafletMap);
+  if (!leafletMap) initMap();
+  Object.values(routeLayers).forEach(l => l.remove());
+  Object.values(markerLayers).forEach(l => l.remove());
+  routeLayers = {}; markerLayers = {};
+
+  // Visited countries
+  const visited = new Set(flights.flatMap(f => [AIRPORTS[f.from]?.country, AIRPORTS[f.to]?.country]).filter(Boolean));
+  for (const [cc, polys] of Object.entries(countryLayers)) {
+    const v = visited.has(cc);
+    polys.forEach(p => p.setStyle({ fillColor: cssVar(v ? '--visited' : '--land'), color: cssVar(v ? '--visited-line' : '--land-line') }));
   }
-  mapLayers.forEach(l => l.remove());
-  mapLayers = [];
 
   // One line per pair of airports, both directions together
   const routes = {};
   flights.forEach(f => {
     if (!AIRPORTS[f.from] || !AIRPORTS[f.to]) return;
-    const key = [f.from, f.to].sort().join('_');
-    if (!routes[key]) routes[key] = { from: f.from, to: f.to, flights: [], airlines: new Set() };
-    routes[key].flights.push(f);
-    if (f.airline) routes[key].airlines.add(f.airline);
+    const k = routeKey(f.from, f.to);
+    (routes[k] = routes[k] || { a: f.from, b: f.to, n: 0 }).n++;
   });
-  Object.values(routes).forEach(r => {
-    const a = AIRPORTS[r.from], b = AIRPORTS[r.to], count = r.flights.length;
-    const line = L.polyline(greatCirclePoints(a.lat, a.lon, b.lat, b.lon), {
-      color: '#3b82f6', weight: Math.min(1 + count * 0.7, 5), opacity: Math.min(0.5 + count * 0.1, 0.9)
+  for (const [k, r] of Object.entries(routes)) {
+    const A = AIRPORTS[r.a], B = AIRPORTS[r.b];
+    const line = L.polyline(greatCirclePoints(A.lat, A.lon, B.lat, B.lon), {
+      color: cssVar('--route'), weight: Math.min(1.5 + r.n * 0.5, 6), opacity: 0.75, lineCap: 'round'
     });
-    const both = r.flights.some(f => f.from !== r.from);
-    line.bindPopup(`
-      <div class="map-popup-title">✈️ ${esc(r.from)} ${both ? '↔' : '→'} ${esc(r.to)}</div>
-      <div class="map-popup-row"><strong>Vols :</strong> ${count}</div>
-      <div class="map-popup-row"><strong>Compagnies :</strong> ${esc([...r.airlines].join(', ') || 'Non renseignée')}</div>
-      <div class="map-popup-row"><strong>Distance :</strong> ${formatDist(getDistance(r.from, r.to))}</div>`, { maxWidth: 260 });
+    line.bindTooltip(`${r.a} ↔ ${r.b} · ${plural(r.n, 'vol', 'vols')}`, { sticky: true, className: 'map-tip' });
+    line.on('click', e => { L.DomEvent.stopPropagation(e); showRoutePanel(k); });
     line.addTo(leafletMap);
-    mapLayers.push(line);
+    routeLayers[k] = line;
+  }
+
+  // Airports, the busiest drawn last so they stay clickable on top
+  const counts = {};
+  flights.forEach(f => { counts[f.from] = (counts[f.from] || 0) + 1; counts[f.to] = (counts[f.to] || 0) + 1; });
+  usedAirports().sort((a, b) => counts[a] - counts[b]).forEach(code => {
+    const ap = AIRPORTS[code];
+    const m = L.circleMarker([ap.lat, ap.lon], {
+      radius: Math.min(5 + Math.sqrt(counts[code]) * 1.6, 15),
+      fillColor: cssVar('--marker'), color: cssVar('--marker-line'), weight: 2, opacity: 1, fillOpacity: 1
+    });
+    m.bindTooltip(`<b>${esc(code)}</b> ${esc(ap.city)}`, { direction: 'top', offset: [0, -6], className: 'map-tip' });
+    m.on('click', e => { L.DomEvent.stopPropagation(e); showAirportPanel(code); });
+    m.addTo(leafletMap);
+    markerLayers[code] = m;
   });
 
-  new Set(flights.flatMap(f => [f.from, f.to].filter(Boolean))).forEach(code => {
-    const ap = AIRPORTS[code];
-    if (!ap) return;
-    const st = getAirportStats(code);
-    const marker = L.circleMarker([ap.lat, ap.lon], {
-      radius: Math.min(4 + st.total * 1.2, 14), fillColor: '#60a5fa', color: '#1e3a5f', weight: 2, opacity: 1, fillOpacity: 0.9
-    });
-    const list = codes => codes.length ? esc(codes.map(c => `${c} (${city(c)})`).join(', ')) : '–';
-    marker.bindPopup(`
-      <div class="map-popup-title">🏢 ${esc(code)} · ${esc(ap.city)}</div>
-      <div class="map-popup-row"><strong>Nom :</strong> ${esc(ap.name)}</div>
-      <div class="map-popup-row"><strong>Passages :</strong> ${st.total} (${st.deps} départ${st.deps > 1 ? 's' : ''} · ${st.arrs} arrivée${st.arrs > 1 ? 's' : ''})</div>
-      <div style="margin-top:6px">
-        <div class="map-popup-row"><strong>Destinations :</strong></div>
-        <div class="map-popup-list">${list(st.dests)}</div>
-        <div class="map-popup-row" style="margin-top:4px"><strong>Provenances :</strong></div>
-        <div class="map-popup-list">${list(st.origins)}</div>
-        <div class="map-popup-row" style="margin-top:4px"><strong>Compagnies :</strong></div>
-        <div class="map-popup-list">${esc(st.airlines.join(', ') || '–')}</div>
-      </div>
-      <div id="apphoto-${esc(code)}" style="margin-top:8px"></div>`, { maxWidth: 300 });
-    marker.on('popupopen', async () => {
-      const url = await fetchAirportPhoto(code);
-      const el = $(`apphoto-${code}`);
-      if (!el || !url) return;
-      const img = new Image();
-      img.style.cssText = 'width:100%;border-radius:6px;margin-top:2px';
-      img.onerror = () => img.remove();
-      img.src = url;
-      el.replaceChildren(img);
-    });
-    marker.addTo(leafletMap);
-    mapLayers.push(marker);
-  });
-  setTimeout(() => leafletMap.invalidateSize(), 100);
+  setTimeout(() => {
+    leafletMap.invalidateSize();
+    fitMap(false);
+    if (mapSelection) reopenMapPanel(); else applyHighlight();
+  }, 60);
 }
 
-const airportPhotoCache = {};
-async function fetchAirportPhoto(code) {
-  if (code in airportPhotoCache) return airportPhotoCache[code];
-  airportPhotoCache[code] = null;
-  const ap = AIRPORTS[code];
-  if (!ap) return null;
-  for (const q of [ap.name, `${ap.city} Airport`, `${code} airport`]) {
-    try {
-      const url = `https://en.wikipedia.org/w/api.php?action=query&prop=pageimages&format=json&piprop=thumbnail&titles=${encodeURIComponent(q)}&pithumbsize=500&origin=*`;
-      const data = await (await fetch(url)).json();
-      const page = Object.values(data.query?.pages || {}).find(p => p.pageid > 0 && /^https:\/\//.test(p.thumbnail?.source || ''));
-      if (page) { airportPhotoCache[code] = page.thumbnail.source; return page.thumbnail.source; }
-    } catch (e) {}
+// Dims everything not linked to the selected airport or route
+function applyHighlight() {
+  const sel = mapSelection;
+  for (const [k, line] of Object.entries(routeLayers)) {
+    const on = !sel || (sel.type === 'airport' ? k.split('-').includes(sel.code) : k === sel.key);
+    line.setStyle({ opacity: on ? (sel ? 1 : 0.75) : 0.12, color: cssVar(on && sel ? '--route-on' : '--route') });
+    if (on && sel) line.bringToFront();
   }
-  return null;
+  const linked = new Set();
+  if (sel?.type === 'airport') {
+    linked.add(sel.code);
+    Object.keys(routeLayers).forEach(k => { const [a, b] = k.split('-'); if (a === sel.code) linked.add(b); if (b === sel.code) linked.add(a); });
+  } else if (sel?.type === 'route') sel.key.split('-').forEach(c => linked.add(c));
+  for (const [code, m] of Object.entries(markerLayers)) {
+    const on = !sel || linked.has(code);
+    const main = sel && (sel.type === 'airport' ? code === sel.code : linked.has(code));
+    m.setStyle({ fillOpacity: on ? 1 : 0.25, opacity: on ? 1 : 0.25, fillColor: cssVar(main ? '--marker-on' : '--marker') });
+    if (on) m.bringToFront();
+  }
+}
+
+// ─── Side panel (bottom sheet on a phone) ───
+function flightRows(list, here) {
+  return `<ul class="mp-flights">${list.map(f => {
+    const code = c => `<span class="${c === here ? 'mp-here' : ''}">${esc(c)}</span>`;
+    return `<li><button type="button" data-flight="${esc(f.id)}">
+      <span class="mp-date">${formatDate(f.date)}</span>
+      <span class="mp-route">${code(f.from)} → ${code(f.to)}</span>
+      <span class="mp-meta">${esc([f.airline, f.flightNumber].filter(Boolean).join(' · '))}</span>
+    </button></li>`;
+  }).join('')}</ul>`;
+}
+const byDateDesc = (a, b) => (b.date + b.departureTime).localeCompare(a.date + a.departureTime);
+
+function openMapPanel(html, sel) {
+  mapSelection = sel;
+  const p = $('map-panel');
+  $('map-panel-body').innerHTML = html;
+  const wasHidden = p.hidden;
+  p.hidden = false;
+  document.body.classList.add('sheet-open');
+  $('map-panel-body').scrollTop = 0;
+  applyHighlight();
+  // On a phone the panel covers the bottom of the screen: bring the map to the top so the highlight stays visible
+  if (wasHidden && window.innerWidth <= 768) {
+    const top = $('map-container').getBoundingClientRect().top - document.querySelector('header').offsetHeight - 8;
+    if (Math.abs(top) > 40) window.scrollBy({ top, behavior: 'smooth' });
+  }
+}
+function closeMapPanel() {
+  if ($('map-panel').hidden && !mapSelection) return;
+  $('map-panel').hidden = true;
+  document.body.classList.remove('sheet-open');
+  mapSelection = null;
+  applyHighlight();
+}
+function reopenMapPanel() {
+  const s = mapSelection;
+  if (s.type === 'airport' && markerLayers[s.code]) showAirportPanel(s.code);
+  else if (s.type === 'route' && routeLayers[s.key]) showRoutePanel(s.key);
+  else closeMapPanel();
+}
+
+function showAirportPanel(code) {
+  const ap = AIRPORTS[code];
+  if (!ap) return;
+  const list = flights.filter(f => f.from === code || f.to === code).sort(byDateDesc);
+  const deps = list.filter(f => f.from === code).length;
+  const links = {};
+  list.forEach(f => { const o = f.from === code ? f.to : f.from; links[o] = (links[o] || 0) + 1; });
+  const first = list[list.length - 1], last = list[0];
+  openMapPanel(`
+    <div class="mp-head">
+      <div class="mp-code">${esc(code)}</div>
+      <div>
+        <div class="mp-title">${esc(ap.name)}</div>
+        <div class="mp-sub">${countryFlag(ap.country)} ${esc(ap.city)}, ${esc(countryName(ap.country))}</div>
+      </div>
+    </div>
+    <div class="mp-stats">
+      <div><b>${list.length}</b><span>${list.length > 1 ? 'passages' : 'passage'}</span></div>
+      <div><b>${deps}</b><span>${deps > 1 ? 'départs' : 'départ'}</span></div>
+      <div><b>${list.length - deps}</b><span>${list.length - deps > 1 ? 'arrivées' : 'arrivée'}</span></div>
+    </div>
+    ${first ? `<div class="mp-note">${list.length > 1 ? `Premier passage le ${formatDate(first.date)}, dernier le ${formatDate(last.date)}.` : `Passage le ${formatDate(first.date)}.`}</div>` : ''}
+    <div class="mp-label">Liaisons</div>
+    <div class="mp-chips">${Object.entries(links).sort((a, b) => b[1] - a[1]).map(([o, n]) =>
+      `<button type="button" class="mp-chip" data-route="${esc(routeKey(code, o))}"><b>${esc(o)}</b> ${esc(city(o))} <span>×${n}</span></button>`).join('')}</div>
+    <div class="mp-label">Vols</div>
+    ${flightRows(list, code)}`, { type: 'airport', code });
+}
+
+function showRoutePanel(key) {
+  const [a, b] = key.split('-');
+  const list = flights.filter(f => routeKey(f.from, f.to) === key).sort(byDateDesc);
+  if (!list.length) return closeMapPanel();
+  const airlines = [...new Set(list.map(f => f.airline).filter(Boolean))];
+  const durs = list.map(f => f.durationMin).filter(m => m > 0);
+  const avg = durs.length ? Math.round(durs.reduce((s, m) => s + m, 0) / durs.length) : 0;
+  openMapPanel(`
+    <div class="mp-head">
+      <div class="mp-code mp-code-route">${esc(a)}<span>↔</span>${esc(b)}</div>
+    </div>
+    <div class="mp-sub" style="margin:-4px 0 12px">
+      <button type="button" class="mp-link" data-airport="${esc(a)}">${esc(city(a))}</button> ↔
+      <button type="button" class="mp-link" data-airport="${esc(b)}">${esc(city(b))}</button>
+    </div>
+    <div class="mp-stats">
+      <div><b>${list.length}</b><span>${list.length > 1 ? 'vols' : 'vol'}</span></div>
+      <div><b>${fmtInt(getDistance(a, b))}</b><span>km</span></div>
+      <div><b>${avg ? fmtDur(avg) : '–'}</b><span>durée moyenne</span></div>
+    </div>
+    ${airlines.length ? `<div class="mp-note">${esc(airlines.join(', '))}</div>` : ''}
+    <div class="mp-label">Vols</div>
+    ${flightRows(list)}`, { type: 'route', key });
 }
 
 // ═══════════════════════════════════════
@@ -1609,7 +1749,17 @@ document.addEventListener('click', e => {
   });
 });
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape') document.querySelectorAll('.modal-overlay.open').forEach(m => closeModal(m.id));
+  if (e.key !== 'Escape') return;
+  const open = document.querySelectorAll('.modal-overlay.open');
+  if (open.length) open.forEach(m => closeModal(m.id)); else closeMapPanel();
+});
+$('map-panel').addEventListener('click', e => {
+  const t = e.target.closest('[data-flight],[data-route],[data-airport],.mp-close');
+  if (!t) return;
+  if (t.classList.contains('mp-close')) closeMapPanel();
+  else if (t.dataset.flight) openFlightDetail(t.dataset.flight);
+  else if (t.dataset.route) showRoutePanel(t.dataset.route);
+  else if (t.dataset.airport) showAirportPanel(t.dataset.airport);
 });
 
 async function init() {
