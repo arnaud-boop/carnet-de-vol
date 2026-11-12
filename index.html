@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="robots" content="noindex, nofollow">
   <!-- Version du site : la changer ici ET dans version.txt a chaque mise a jour -->
-  <meta name="app-version" content="2026-11-12.18">
+  <meta name="app-version" content="2026-11-12.19">
   <title>Carnet de vol</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9C%88%EF%B8%8F%3C/text%3E%3C/svg%3E">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/maplibre-gl/5.24.0/maplibre-gl.css">
@@ -132,6 +132,30 @@
     .kpi b{display:block;font-family:var(--serif);font-size:30px;font-weight:600;color:var(--passport-hi);line-height:1.1;font-variant-numeric:tabular-nums;}
     .kpi span{font-size:12px;color:var(--gold-2);}
     .mrz{font-family:var(--mono);font-size:12px;letter-spacing:.12em;color:var(--gold-2);border-top:1px solid rgba(227,197,140,.3);padding-top:10px;white-space:nowrap;overflow:hidden;line-height:1.6;}
+
+    .cover-kicker{font:500 11px var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--gold-2);margin-bottom:6px;}
+    .cover-map{margin:18px -6px 6px;}
+    .mini-world{display:block;width:100%;height:auto;max-height:290px;margin:0 auto;}
+    .mini-world path{fill:rgba(227,197,140,.13);stroke:none;}
+    .mini-world path.v{fill:var(--gold);}
+    .mini-world path.s{fill:rgba(227,197,140,.42);}
+    .mini-world .dots circle{fill:var(--passport-hi);stroke:var(--passport);stroke-width:1.2;}
+    .cover-flags{font-size:18px;letter-spacing:2px;line-height:1.6;margin:4px 0 2px;}
+    .cover-fields{display:grid;grid-template-columns:repeat(3,1fr);gap:8px 12px;border-top:1px solid rgba(227,197,140,.3);padding:12px 0;margin-top:4px;}
+    .cover-fields span{display:block;font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--gold-2);}
+    .cover-fields b{font:500 14px var(--mono);color:var(--passport-hi);}
+    .board{background:var(--flap);border:1px solid var(--border);border-radius:18px;padding:10px 16px 6px;color:var(--flap-ink);}
+    .board-head{display:grid;grid-template-columns:170px minmax(0,1fr) auto;gap:14px;font:500 10px var(--mono);letter-spacing:.14em;text-transform:uppercase;color:#8d7d5c;padding:6px 0 8px;border-bottom:1px solid #3a342c;}
+    .board-row{display:grid;grid-template-columns:170px minmax(0,1fr) auto;gap:14px;align-items:center;width:100%;text-align:left;background:none;border:none;border-bottom:1px solid #3a342c;padding:10px 0;font:inherit;color:inherit;cursor:pointer;}
+    .board-row:last-child{border-bottom:none;}
+    .board-row:hover .tiles i{background:#3a332b;}
+    .board-label{font:500 12px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:#d9c79f;}
+    .tiles{display:flex;gap:3px;flex-wrap:wrap;}
+    .tiles i{font-style:normal;display:inline-block;min-width:22px;text-align:center;font:500 19px var(--mono);color:var(--flap-ink);background:#2f2a24;border-radius:4px;padding:2px 2px;position:relative;line-height:1.25;}
+    .tiles i::after{content:"";position:absolute;left:0;right:0;top:50%;height:1px;background:rgba(0,0,0,.6);}
+    .tiles i.gap{background:none;min-width:8px;}
+    .board-sub{font-size:12px;color:#a8987a;text-align:right;}
+    .board-head span:last-child{text-align:right;}
 
     /* Stamps */
     .stamps{display:grid;grid-template-columns:repeat(auto-fill,minmax(112px,1fr));gap:14px;}
@@ -524,6 +548,13 @@
       .filter-bar input[type=search]{flex-basis:100%;}
       .filter-bar select{flex:1 1 0;min-width:0;}
       .extremes{grid-template-columns:1fr 1fr;gap:8px;}
+      .cover-fields{grid-template-columns:1fr 1fr;}
+      .cover-flags{font-size:16px;}
+      .board{padding:8px 12px 4px;}
+      .board-head{display:none;}
+      .board-row{grid-template-columns:1fr;gap:6px;}
+      .board-sub{text-align:left;}
+      .tiles i{min-width:18px;font-size:16px;}
       .j-trip-head{padding:14px 14px 12px;}
       .j-trip .stub{border-top:2px dashed var(--border);}
       .ext b{font-size:20px;}

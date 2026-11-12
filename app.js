@@ -526,6 +526,46 @@ function stampHTML(row, i) {
     <span class="flag">${countryFlag(row.cc)}</span><span class="cn">${esc(countryName(row.cc))}</span><span class="yr">${esc(sub)}</span></button>`;
 }
 
+// Small world map for the passport cover, drawn once from world.js (simplified for its size)
+let miniWorld = null;   // [{ cc, d }] SVG paths, equirectangular, 2 units per degree
+const MINI = { x0: -180, x1: 192, y0: 84, y1: -57, k: 2 };
+function miniWorldPaths() {
+  if (miniWorld || typeof WORLD === 'undefined') return miniWorld || [];
+  const X = lon => ((lon - MINI.x0) * MINI.k).toFixed(1), Y = lat => ((MINI.y0 - lat) * MINI.k).toFixed(1);
+  miniWorld = WORLD.countries.map(c => {
+    let d = '';
+    c.r.forEach(r => {
+      let x = 0, y = 0, lx = null, ly = null, ring = '', n = 0;
+      for (let i = 0; i < r.length; i += 2) {
+        x += r[i]; y += r[i + 1];
+        const lon = x / 100, lat = y / 100;
+        // keep a point only when it moved at least 0.7 degree: plenty for a 360 px wide map
+        if (lx === null || Math.abs(lon - lx) + Math.abs(lat - ly) >= 0.7) { ring += (n ? 'L' : 'M') + X(lon) + ' ' + Y(lat); lx = lon; ly = lat; n++; }
+      }
+      if (n >= 3) d += ring + 'Z';
+    });
+    return { cc: c.c || '', d };
+  }).filter(p => p.d);
+  return miniWorld;
+}
+function miniWorldSVG(info) {
+  const st = {};
+  info.visited.forEach(r => { st[r.cc] = 'v'; });
+  info.stopover.forEach(r => { st[r.cc] = 's'; });
+  const w = (MINI.x1 - MINI.x0) * MINI.k, h = (MINI.y0 - MINI.y1) * MINI.k;
+  const dots = usedAirportsAll().map(c => `<circle cx="${((AIRPORTS[c].lon - MINI.x0) * MINI.k).toFixed(1)}" cy="${((MINI.y0 - AIRPORTS[c].lat) * MINI.k).toFixed(1)}" r="2.6"/>`).join('');
+  return `<svg class="mini-world" viewBox="0 0 ${w} ${h}" role="img" aria-label="Carte des pays visités">
+    ${miniWorldPaths().map(p => `<path class="${st[p.cc] === 'v' ? 'v' : st[p.cc] === 's' ? 's' : ''}" d="${p.d}"/>`).join('')}
+    <g class="dots">${dots}</g></svg>`;
+}
+function usedAirportsAll() { return [...new Set(flights.flatMap(f => [f.from, f.to]))].filter(c => AIRPORTS[c]); }
+
+// Departure board: each value written in split-flap tiles
+function flapTiles(text) {
+  return `<span class="tiles">${[...String(text).toUpperCase()].map(ch => ch === ' ' ? '<i class="gap"></i>' : `<i>${esc(ch)}</i>`).join('')}</span>`;
+}
+function shortType(t) { return String(t || '').replace(/^(Boeing|Airbus|Embraer|Bombardier|De Havilland|ATR)\s+/i, '').trim(); }
+
 function renderPassport() {
   const el = $('passport');
   if (!flights.length) {
@@ -535,29 +575,36 @@ function renderPassport() {
   const info = countryInfo();
   const km = flights.reduce((s, f) => s + (f.distKm || 0), 0);
   const mins = flights.reduce((s, f) => s + (f.durationMin || 0), 0);
-  const airports = new Set(flights.flatMap(f => [f.from, f.to]).filter(Boolean)).size;
+  const airports = usedAirportsAll().length;
   const first = flights.reduce((m, f) => f.date < m ? f.date : m, '9999');
+  const last = flights.reduce((m, f) => f.date > m ? f.date : m, '0000');
   const hours = Math.floor(mins / 60);
   const nCountries = info.visited.length;
   const totalCO2 = flights.reduce((s, f) => s + co2Of(f), 0);
+  const home = homeAirport();
   const longest = [...flights].filter(f => f.durationMin > 0).sort((a, b) => b.durationMin - a.durationMin)[0];
-  const types = {};
-  flights.forEach(f => { if (f.aircraftType) types[f.aircraftType] = (types[f.aircraftType] || 0) + 1; });
-  const topType = Object.entries(types).sort((a, b) => b[1] - a[1])[0];
+  const count = key => { const o = {}; flights.forEach(f => { if (f[key]) o[f[key]] = (o[f[key]] || 0) + 1; }); return Object.entries(o).sort((a, b) => b[1] - a[1]); };
+  const types = count('aircraftType'), airlines = count('airline');
+  const tiedAirline = airlines[1] && airlines[1][1] === airlines[0][1] ? airlines[1][0] : '';
   const seats = { window: 0, middle: 0, aisle: 0 };
   flights.forEach(f => { const p = seatPosition(f)?.pos; if (p) seats[p]++; });
   const seatTotal = seats.window + seats.middle + seats.aisle;
   const [favPos, favN] = Object.entries(seats).sort((a, b) => b[1] - a[1])[0];
-  const POS = { window: 'Côté hublot', middle: 'Au milieu', aisle: 'Côté couloir' };
-  const mrzName = 'CARNET<DE<VOL';
+  const POS = { window: 'Hublot', middle: 'Milieu', aisle: 'Couloir' };
   const pad = s => (s + '<'.repeat(44)).slice(0, 44);
+  const flags = info.visited.map(r => countryFlag(r.cc)).join(' ');
+
+  const row = (label, value, sub, onclick) => `<button type="button" class="board-row" onclick="${onclick}">
+      <span class="board-label">${label}</span>${flapTiles(value)}<span class="board-sub">${sub}</span></button>`;
 
   el.innerHTML = `
     <div class="cover">
       <div class="cover-top">
-        <div><h1>Passeport<br>de voyage</h1><div class="since">Premier vol le ${formatDate(first)}</div></div>
+        <div><div class="cover-kicker">Carnet de vol · ${esc(home || '')}</div><h1>Passeport<br>de voyage</h1></div>
         <div class="emblem" aria-hidden="true">✈</div>
       </div>
+      <div class="cover-map">${miniWorldSVG(info)}</div>
+      <div class="cover-flags" title="Pays visités">${flags}</div>
       <div class="kpis">
         <button class="kpi" onclick="showView('flights')"><b>${flights.length}</b><span>vols</span></button>
         <button class="kpi" onclick="showDistancePopup()"><b>${fmtInt(km)}</b><span>km · ${(km / 40075).toFixed(1)}× la Terre</span></button>
@@ -566,7 +613,12 @@ function renderPassport() {
         <button class="kpi" onclick="showAirportsPopup()"><b>${airports}</b><span>aéroports</span></button>
         <button class="kpi" onclick="showView('journal')"><b>${info.trips.length}</b><span>voyages</span></button>
       </div>
-      <div class="mrz" aria-hidden="true">${esc(pad('P<NOR<<' + mrzName))}<br>${esc(pad(`${flights.length}FLT<${Math.round(km)}KM<${nCountries}PAYS<${first.slice(0, 4)}`))}</div>
+      <div class="cover-fields">
+        <div><span>Premier vol</span><b>${formatDate(first)}</b></div>
+        <div><span>Dernier vol</span><b>${formatDate(last)}</b></div>
+        <div><span>Aéroport d'attache</span><b>${esc(home || '–')} · ${esc(city(home))}</b></div>
+      </div>
+      <div class="mrz" aria-hidden="true">${esc(pad('P<NOR<<CARNET<DE<VOL'))}<br>${esc(pad(`${flights.length}FLT<${Math.round(km)}KM<${nCountries}PAYS<${first.slice(0, 4)}`))}</div>
     </div>
 
     <h2 class="sec-title" id="stamps">Tampons</h2>
@@ -583,13 +635,16 @@ function renderPassport() {
     ${info.stopover.length ? `<h2 class="sec-title" style="font-size:19px;margin-top:26px">Seulement en escale</h2>
     <div class="stamps" id="stamps-stopover">${info.stopover.map(stampHTML).join('')}</div>` : ''}
 
-    <h2 class="sec-title">Records</h2>
-    <div class="records">
-      <button class="rec" onclick="showDurationPopup()"><div class="k">Heures dans les airs</div><div class="flaps">${[...String(hours)].map(c => `<span>${c}</span>`).join('')}</div><div class="s" style="margin-top:6px">soit ${(mins / 60 / 24).toFixed(1)} jours</div></button>
-      ${longest ? `<button class="rec" onclick="openFlightDetail('${longest.id}')"><div class="k">Vol le plus long</div><div class="v">${esc(longest.from)} → ${esc(longest.to)}</div><div class="s">${fmtDur(longest.durationMin)} · ${fmtInt(longest.distKm)} km · ${formatDate(longest.date)}</div></button>` : ''}
-      ${topType ? `<button class="rec" onclick="showView('analytics')"><div class="k">Avion le plus fréquent</div><div class="v">${esc(topType[0])}</div><div class="s">${plural(topType[1], 'vol', 'vols')}</div></button>` : ''}
-      ${seatTotal ? `<button class="rec" onclick="showView('analytics')"><div class="k">Place préférée</div><div class="v">${POS[favPos]}</div><div class="s">${favN} fois sur ${seatTotal} sièges connus</div></button>` : ''}
-      <button class="rec" onclick="showCO2Popup()"><div class="k">Empreinte carbone estimée</div><div class="v">${(totalCO2 / 1000).toFixed(1)} t CO₂e</div><div class="s">forçage radiatif inclus</div></button>
+    <h2 class="sec-title">Tableau des records</h2>
+    <div class="board">
+      <div class="board-head"><span>Records</span><span>Valeur</span><span>Détail</span></div>
+      ${row('Heures en vol', hours, `soit ${(mins / 60 / 24).toFixed(1)} jours`, 'showDurationPopup()')}
+      ${longest ? row('Vol le plus long', `${longest.from}-${longest.to}`, `${fmtDur(longest.durationMin)} · ${fmtInt(longest.distKm)} km · ${formatDate(longest.date)}`, `openFlightDetail('${longest.id}')`) : ''}
+      ${row('Tours de la Terre', (km / 40075).toFixed(1) + 'X', `${fmtInt(km)} km parcourus`, 'showDistancePopup()')}
+      ${types.length ? row('Avion favori', shortType(types[0][0]).slice(0, 10), `${esc(types[0][0])} · ${plural(types[0][1], 'vol', 'vols')}`, "showView('analytics')") : ''}
+      ${airlines.length ? row('Compagnie favorite', airlines[0][0].slice(0, 10), `${plural(airlines[0][1], 'vol', 'vols')}${tiedAirline ? ` · à égalité avec ${esc(tiedAirline)}` : ''}`, "showView('analytics')") : ''}
+      ${seatTotal ? row('Place préférée', POS[favPos], `${favN} fois sur ${seatTotal} sièges connus`, "showView('analytics')") : ''}
+      ${row('CO₂e estimé', (totalCO2 / 1000).toFixed(1) + 'T', 'forçage radiatif inclus', 'showCO2Popup()')}
     </div>`;
   addShowMore('stamps-visited', 8);
   addShowMore('stamps-stopover', 8);
