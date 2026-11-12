@@ -671,13 +671,17 @@ function countryInfo() {
   };
   const home = homeAirport();
   if (home && AIRPORTS[home]) touch(AIRPORTS[home].country, hasHistory() ? '' : flights.reduce((m, f) => f.date < m ? f.date : m, '9999'), -1, true, 0);
+  // A logbook with a history counts the flights that leave or reach each country: a flight inside one country counts once.
+  const hist = hasHistory();
+  const countries = f => [...new Set([f.from, f.to].map(c => AIRPORTS[c]?.country).filter(Boolean))];
   // The history has no dates: every country it reaches counts as visited ('' = before the detailed flights)
-  routes.forEach(r => [r.from, r.to].forEach(c => touch(AIRPORTS[c]?.country, '', -1, true, r.count)));
+  routes.forEach(r => countries(r).forEach(cc => touch(cc, '', -1, true, r.count)));
+  if (hist) flights.forEach(f => countries(f).forEach(cc => touch(cc, f.date, -1, false)));
   trips.forEach((t, ti) => t.flights.forEach((f, i) => {
     const next = t.flights[i + 1];
     const transit = next && next.from === f.to && next.date === arrivalDay(f);
-    touch(AIRPORTS[f.to]?.country, arrivalDay(f), ti, !transit);
-    if (i === 0 && f.from !== home) touch(AIRPORTS[f.from]?.country, f.date, ti, true);
+    touch(AIRPORTS[f.to]?.country, arrivalDay(f), ti, !transit, hist ? 0 : 1);
+    if (i === 0 && f.from !== home) touch(AIRPORTS[f.from]?.country, f.date, ti, true, hist ? 0 : 1);
   }));
   const visited = [], stopover = [];
   for (const [cc, c] of Object.entries(auto)) {
