@@ -577,12 +577,12 @@ function renderPassport() {
       <span><i class="dot g"></i>escale seulement</span>
       <span class="muted">Un clic sur un tampon change son statut.</span>
     </div>
-    <div class="stamps">
+    <div class="stamps" id="stamps-visited">
       ${info.visited.map(stampHTML).join('')}
       <button type="button" class="stamp add" onclick="openAddCountry()" title="Ajouter un pays visité sans avion"><span class="flag">+</span><span class="cn">Ajouter un pays</span><span class="yr">sans avion</span></button>
     </div>
     ${info.stopover.length ? `<h2 class="sec-title" style="font-size:19px;margin-top:26px">Seulement en escale</h2>
-    <div class="stamps">${info.stopover.map(stampHTML).join('')}</div>` : ''}
+    <div class="stamps" id="stamps-stopover">${info.stopover.map(stampHTML).join('')}</div>` : ''}
 
     <h2 class="sec-title">Records</h2>
     <div class="records">
@@ -592,6 +592,8 @@ function renderPassport() {
       ${seatTotal ? `<button class="rec" onclick="showView('analytics')"><div class="k">Place préférée</div><div class="v">${POS[favPos]}</div><div class="s">${favN} fois sur ${seatTotal} sièges connus</div></button>` : ''}
       <button class="rec" onclick="showCO2Popup()"><div class="k">Empreinte carbone estimée</div><div class="v">${(totalCO2 / 1000).toFixed(1)} t CO₂e</div><div class="s">forçage radiatif inclus</div></button>
     </div>`;
+  addShowMore('stamps-visited', 8);
+  addShowMore('stamps-stopover', 8);
 }
 
 // ─── Country sheet: change the status of one country ───
@@ -1516,7 +1518,7 @@ const expandedLists = new Set();
 function addShowMore(id, limit) {
   const ul = $(id);
   if (!ul) return;
-  const items = [...ul.children];
+  const items = [...ul.children].filter(el => !el.classList.contains('add'));
   if (items.length <= limit) return;
   const btn = document.createElement('button');
   btn.type = 'button';
