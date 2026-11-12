@@ -15,6 +15,7 @@ const DATA_FILE = 'flights.json';
 
 let cfg = null;
 let flights = [];
+let countryStatus = {};               // passport: country code -> 'visited' | 'stopover' | 'land'
 let dataSha = null;                  // version of flights.json this device last saw
 let sortKey = 'date', sortDir = 1;
 let saving = false;
@@ -200,6 +201,11 @@ function applyDoc(doc) {
   if (!Array.isArray(list)) throw new StoreError('Le fichier de données a un format inattendu.', -1);
   addAirports(doc.airports);
   flights = list.map(normalizeFlight).filter(Boolean);
+  countryStatus = {};
+  const cs = !Array.isArray(doc) && doc.countryStatus;
+  if (cs && typeof cs === 'object') {
+    for (const [cc, st] of Object.entries(cs)) if (/^[A-Z]{2}$/.test(cc) && ['visited', 'stopover', 'land'].includes(st)) countryStatus[cc] = st;
+  }
 }
 
 // The file content: flights sorted by date, plus every airport they use.
@@ -212,7 +218,10 @@ function buildDoc() {
     const a = AIRPORTS[c];
     if (a) airports[c] = { name: a.name, city: a.city, country: a.country, lat: a.lat, lon: a.lon, tz: a.tz || null };
   });
-  return { schema: 1, airports, flights: sorted };
+  const doc = { schema: 1, airports, flights: sorted };
+  const cs = Object.keys(countryStatus).sort();
+  if (cs.length) doc.countryStatus = Object.fromEntries(cs.map(cc => [cc, countryStatus[cc]]));
+  return doc;
 }
 
 // ═══════════════════════════════════════
@@ -295,7 +304,7 @@ function persist(message) {
 
 // Applies a change in memory, then saves it. If the save fails the change is undone.
 async function commitChange(mutate, message) {
-  const before = flights.slice();
+  const before = flights.slice(), beforeCountries = { ...countryStatus };
   mutate();
   setStatus('busy', 'Enregistrement…');
   try {
@@ -303,7 +312,7 @@ async function commitChange(mutate, message) {
     setStatus('ok');
     return true;
   } catch (e) {
-    flights = before;
+    flights = before; countryStatus = beforeCountries;
     if (e.status === 409 || e.status === 422) {
       await reloadData(true);
       showToast('Les données ont changé sur un autre appareil. Elles sont rechargées. Recommencez la modification.', true);
@@ -388,7 +397,7 @@ async function reloadData(silent) {
 
 // ─── First use on a device ───
 function showSetup(message) {
-  $('app').hidden = true; $('header-actions').hidden = true; $('banner').hidden = true;
+  $('app').hidden = true; $('header-actions').hidden = true; $('banner').hidden = true; $('nav').hidden = true;
   $('setup').hidden = false;
   $('setup-error').textContent = message || '';
   if (!$('cfg-repo').value) {
@@ -397,7 +406,7 @@ function showSetup(message) {
   }
 }
 function showApp() {
-  $('setup').hidden = true; $('app').hidden = false; $('header-actions').hidden = false;
+  $('setup').hidden = true; $('app').hidden = false; $('header-actions').hidden = false; $('nav').hidden = false;
 }
 
 async function connect(e) {
@@ -451,7 +460,8 @@ function showView(name) {
 function renderAll() {
   if ($('app').hidden) return;
   const active = document.querySelector('.view.active')?.id;
-  if (active === 'view-dashboard') renderDashboard();
+  if (active === 'view-passport') renderPassport();
+  else if (active === 'view-map') renderMap();
   else if (active === 'view-flights') renderFlightsTable();
   else if (active === 'view-journal') renderJournal();
   else if (active === 'view-analytics') renderAnalytics();
@@ -459,57 +469,193 @@ function renderAll() {
 const city = code => AIRPORTS[code]?.city || code || '';
 
 // ═══════════════════════════════════════
-//  DASHBOARD
+//  PASSPORT
 // ═══════════════════════════════════════
-function renderDashboard() {
-  const total = flights.length;
-  const totalKm = flights.reduce((s, f) => s + (f.distKm || 0), 0);
-  const totalCO2 = flights.reduce((s, f) => s + co2Of(f), 0);
-  const totalMins = flights.reduce((s, f) => s + (f.durationMin || 0), 0);
-  const logged = flights.filter(f => f.durationMin > 0).length;
-  const airports = new Set(flights.flatMap(f => [f.from, f.to].filter(Boolean)));
-  const countries = new Set(flights.flatMap(f => [AIRPORTS[f.from]?.country, AIRPORTS[f.to]?.country].filter(Boolean)));
-  const thisYear = String(new Date().getFullYear());
-  const nYear = flights.filter(f => f.date.startsWith(thisYear)).length;
+// Country status. Countries reached by plane get an automatic status:
+// "visited" when at least one stay was there, "stopover" when every visit
+// was a connection left the same day. countryStatus (saved in the data file)
+// can override it, and adds countries visited without flying ("land").
+const STATUS_LABEL = { visited: 'visité en avion', land: 'visité sans avion', stopover: 'escale seulement' };
 
-  $('stats-grid').innerHTML = `
-    <div class="stat-card" onclick="showView('flights')" title="Voir tous les vols">
-      <div class="stat-icon">✈️</div>
-      <div class="stat-label">Vols</div>
-      <div class="stat-value">${total}</div>
-      <div class="stat-sub">${nYear} cette année</div>
+function countryInfo() {
+  const trips = buildTrips();
+  const auto = {};   // cc -> { visited: bool, first, trips:Set }
+  const touch = (cc, date, tripIdx, isStay) => {
+    if (!cc) return;
+    const c = auto[cc] = auto[cc] || { stay: false, first: date, trips: new Set() };
+    if (date < c.first) c.first = date;
+    if (isStay) { c.stay = true; c.trips.add(tripIdx); }
+  };
+  const home = homeAirport();
+  if (home && AIRPORTS[home]) touch(AIRPORTS[home].country, flights.reduce((m, f) => f.date < m ? f.date : m, '9999'), -1, true);
+  trips.forEach((t, ti) => t.flights.forEach((f, i) => {
+    const next = t.flights[i + 1];
+    const transit = next && next.from === f.to && next.date === arrivalDay(f);
+    touch(AIRPORTS[f.to]?.country, arrivalDay(f), ti, !transit);
+    if (i === 0 && f.from !== home) touch(AIRPORTS[f.from]?.country, f.date, ti, true);
+  }));
+  const visited = [], stopover = [];
+  for (const [cc, c] of Object.entries(auto)) {
+    const autoStatus = c.stay ? 'visited' : 'stopover';
+    const status = countryStatus[cc] === 'stopover' || countryStatus[cc] === 'visited' ? countryStatus[cc] : autoStatus;
+    const row = { cc, first: c.first, trips: c.trips.size, status, auto: autoStatus, overridden: status !== autoStatus };
+    (status === 'stopover' ? stopover : visited).push(row);
+  }
+  for (const [cc, st] of Object.entries(countryStatus)) {
+    if (st === 'land' && !auto[cc]) visited.push({ cc, first: '', trips: 0, status: 'land', auto: null, overridden: true });
+  }
+  visited.sort((a, b) => (a.first || '9999').localeCompare(b.first || '9999') || a.cc.localeCompare(b.cc));
+  stopover.sort((a, b) => a.first.localeCompare(b.first));
+  return { visited, stopover, trips };
+}
+
+function homeAirport() {
+  const counts = {};
+  flights.forEach(f => [f.from, f.to].forEach(c => { counts[c] = (counts[c] || 0) + 1; }));
+  return Object.keys(counts).sort((a, b) => counts[b] - counts[a])[0];
+}
+
+const STAMP_COLORS = ['#B23A2E', '#1E7864', '#2E6DAE', '#7A4FB0', '#B5651D', '#A33A6B', '#3E7D2A', '#9A6A12', '#2B6E8F', '#8C2A37'];
+function stampHTML(row, i) {
+  const cls = row.status === 'land' ? 'land' : row.status === 'stopover' ? 'stop' : '';
+  const color = row.status === 'stopover' ? '' : `color:${STAMP_COLORS[i % STAMP_COLORS.length]};`;
+  const rot = ((row.cc.charCodeAt(0) * 7 + row.cc.charCodeAt(1) * 3) % 15) - 7;
+  const sub = row.status === 'land' ? 'sans avion'
+    : row.status === 'stopover' ? 'escale'
+    : `${row.first.slice(0, 4)}${row.trips > 1 ? ' · ' + row.trips + '×' : ''}`;
+  return `<button type="button" class="stamp ${cls}" style="${color}transform:rotate(${rot}deg)" data-country="${esc(row.cc)}" title="${esc(countryName(row.cc))} : ${esc(STATUS_LABEL[row.status])}. Cliquer pour changer.">
+    <span class="flag">${countryFlag(row.cc)}</span><span class="cn">${esc(countryName(row.cc))}</span><span class="yr">${esc(sub)}</span></button>`;
+}
+
+function renderPassport() {
+  const el = $('passport');
+  if (!flights.length) {
+    el.innerHTML = '<div class="empty-state"><div class="emoji">🛂</div><p>Le passeport se remplit avec les vols.</p><button class="btn btn-primary" onclick="openModal()">+ Ajouter le premier vol</button></div>';
+    return;
+  }
+  const info = countryInfo();
+  const km = flights.reduce((s, f) => s + (f.distKm || 0), 0);
+  const mins = flights.reduce((s, f) => s + (f.durationMin || 0), 0);
+  const airports = new Set(flights.flatMap(f => [f.from, f.to]).filter(Boolean)).size;
+  const first = flights.reduce((m, f) => f.date < m ? f.date : m, '9999');
+  const hours = Math.floor(mins / 60);
+  const nCountries = info.visited.length;
+  const totalCO2 = flights.reduce((s, f) => s + co2Of(f), 0);
+  const longest = [...flights].filter(f => f.durationMin > 0).sort((a, b) => b.durationMin - a.durationMin)[0];
+  const types = {};
+  flights.forEach(f => { if (f.aircraftType) types[f.aircraftType] = (types[f.aircraftType] || 0) + 1; });
+  const topType = Object.entries(types).sort((a, b) => b[1] - a[1])[0];
+  const seats = { window: 0, middle: 0, aisle: 0 };
+  flights.forEach(f => { const p = seatPosition(f)?.pos; if (p) seats[p]++; });
+  const seatTotal = seats.window + seats.middle + seats.aisle;
+  const [favPos, favN] = Object.entries(seats).sort((a, b) => b[1] - a[1])[0];
+  const POS = { window: 'Côté hublot', middle: 'Au milieu', aisle: 'Côté couloir' };
+  const mrzName = 'CARNET<DE<VOL';
+  const pad = s => (s + '<'.repeat(44)).slice(0, 44);
+
+  el.innerHTML = `
+    <div class="cover">
+      <div class="cover-top">
+        <div><h1>Passeport<br>de voyage</h1><div class="since">Premier vol le ${formatDate(first)}</div></div>
+        <div class="emblem" aria-hidden="true">✈</div>
+      </div>
+      <div class="kpis">
+        <button class="kpi" onclick="showView('flights')"><b>${flights.length}</b><span>vols</span></button>
+        <button class="kpi" onclick="showDistancePopup()"><b>${fmtInt(km)}</b><span>km · ${(km / 40075).toFixed(1)}× la Terre</span></button>
+        <button class="kpi" onclick="showDurationPopup()"><b>${hours} h</b><span>dans les airs</span></button>
+        <button class="kpi" onclick="document.getElementById('stamps').scrollIntoView({behavior:'smooth',block:'start'})"><b>${nCountries}</b><span>pays visités</span></button>
+        <button class="kpi" onclick="showAirportsPopup()"><b>${airports}</b><span>aéroports</span></button>
+        <button class="kpi" onclick="showView('journal')"><b>${info.trips.length}</b><span>voyages</span></button>
+      </div>
+      <div class="mrz" aria-hidden="true">${esc(pad('P<NOR<<' + mrzName))}<br>${esc(pad(`${flights.length}FLT<${Math.round(km)}KM<${nCountries}PAYS<${first.slice(0, 4)}`))}</div>
     </div>
-    <div class="stat-card" onclick="showDistancePopup()" title="Voir les vols par distance">
-      <div class="stat-icon">🌍</div>
-      <div class="stat-label">Distance</div>
-      <div class="stat-value">${totalKm > 999 ? (totalKm / 1000).toFixed(1) + 'k' : totalKm}</div>
-      <div class="stat-sub">${fmtInt(totalKm)} km · ${(totalKm / 40075).toFixed(1)}× le tour de la Terre</div>
+
+    <h2 class="sec-title" id="stamps">Tampons</h2>
+    <div class="legend">
+      <span><i class="dot"></i>visité en avion</span>
+      <span><i class="dot d"></i>visité sans avion</span>
+      <span><i class="dot g"></i>escale seulement</span>
+      <span class="muted">Un clic sur un tampon change son statut.</span>
     </div>
-    <div class="stat-card" onclick="showAirportsPopup()" title="Voir le détail par aéroport">
-      <div class="stat-icon">🏢</div>
-      <div class="stat-label">Aéroports</div>
-      <div class="stat-value">${airports.size}</div>
-      <div class="stat-sub">aéroports différents</div>
+    <div class="stamps">
+      ${info.visited.map(stampHTML).join('')}
+      <button type="button" class="stamp add" onclick="openAddCountry()" title="Ajouter un pays visité sans avion"><span class="flag">+</span><span class="cn">Ajouter un pays</span><span class="yr">sans avion</span></button>
     </div>
-    <div class="stat-card" onclick="showCountriesPopup()" title="Voir les pays">
-      <div class="stat-icon">🗺️</div>
-      <div class="stat-label">Pays</div>
-      <div class="stat-value">${countries.size}</div>
-      <div class="stat-sub">pays visités</div>
-    </div>
-    <div class="stat-card" onclick="showDurationPopup()" title="Voir les vols par durée">
-      <div class="stat-icon">⏱️</div>
-      <div class="stat-label">Temps en vol</div>
-      <div class="stat-value">${fmtMins(totalMins)}</div>
-      <div class="stat-sub">${logged} vol${logged !== 1 ? 's' : ''} sur ${total} avec une durée</div>
-    </div>
-    <div class="stat-card co2-card" onclick="showCO2Popup()" title="Voir les vols par CO₂">
-      <div class="stat-icon">🌱</div>
-      <div class="stat-label">CO₂e total</div>
-      <div class="stat-value">${totalCO2 >= 1000 ? (totalCO2 / 1000).toFixed(1) + ' t' : totalCO2 + ' kg'}</div>
-      <div class="stat-sub">estimation, forçage radiatif inclus</div>
+    ${info.stopover.length ? `<h2 class="sec-title" style="font-size:19px;margin-top:26px">Seulement en escale</h2>
+    <div class="stamps">${info.stopover.map(stampHTML).join('')}</div>` : ''}
+
+    <h2 class="sec-title">Records</h2>
+    <div class="records">
+      <button class="rec" onclick="showDurationPopup()"><div class="k">Heures dans les airs</div><div class="flaps">${[...String(hours)].map(c => `<span>${c}</span>`).join('')}</div><div class="s" style="margin-top:6px">soit ${(mins / 60 / 24).toFixed(1)} jours</div></button>
+      ${longest ? `<button class="rec" onclick="openFlightDetail('${longest.id}')"><div class="k">Vol le plus long</div><div class="v">${esc(longest.from)} → ${esc(longest.to)}</div><div class="s">${fmtDur(longest.durationMin)} · ${fmtInt(longest.distKm)} km · ${formatDate(longest.date)}</div></button>` : ''}
+      ${topType ? `<button class="rec" onclick="showView('analytics')"><div class="k">Avion le plus fréquent</div><div class="v">${esc(topType[0])}</div><div class="s">${plural(topType[1], 'vol', 'vols')}</div></button>` : ''}
+      ${seatTotal ? `<button class="rec" onclick="showView('analytics')"><div class="k">Place préférée</div><div class="v">${POS[favPos]}</div><div class="s">${favN} fois sur ${seatTotal} sièges connus</div></button>` : ''}
+      <button class="rec" onclick="showCO2Popup()"><div class="k">Empreinte carbone estimée</div><div class="v">${(totalCO2 / 1000).toFixed(1)} t CO₂e</div><div class="s">forçage radiatif inclus</div></button>
     </div>`;
-  renderMap();
+}
+
+// ─── Country sheet: change the status of one country ───
+function openCountrySheet(cc) {
+  const info = countryInfo();
+  const row = [...info.visited, ...info.stopover].find(r => r.cc === cc);
+  if (!row) return;
+  const list = flights.filter(f => AIRPORTS[f.from]?.country === cc || AIRPORTS[f.to]?.country === cc).sort(byDateDesc);
+  const opt = (status, label, help) => `<button type="button" class="${row.status === status ? 'on' : ''}" data-set-status="${status}">
+      <span>${status === 'stopover' ? '◌' : status === 'land' ? '◍' : '●'}</span><span>${label}<small>${help}</small></span></button>`;
+  const body = row.status === 'land'
+    ? `<p class="muted" style="margin-bottom:12px">Pays ajouté à la main, visité sans avion.</p>
+       <div class="choice"><button type="button" data-set-status="remove"><span>✕</span><span>Retirer ce pays<small>Il disparaît du passeport.</small></span></button></div>`
+    : `<div class="choice">
+        ${opt('visited', 'Visité', 'Compte dans les pays visités.')}
+        ${opt('stopover', 'Escale seulement', 'Correspondance sans y séjourner. Ne compte pas.')}
+       </div>
+       ${row.overridden ? `<p class="muted" style="margin:-4px 0 12px">Choix fait à la main. Le calcul automatique donnait « ${esc(STATUS_LABEL[row.auto])} ». <button type="button" class="mp-link" data-set-status="auto">Revenir au calcul automatique</button></p>` : `<p class="muted" style="margin:-4px 0 12px">Statut calculé automatiquement à partir des vols.</p>`}
+       ${list.length ? `<div class="section-label">${plural(list.length, 'vol', 'vols')}</div>
+       <ul class="stat-popup-list">${list.map((f, i) => flightLi(f, i, esc(f.airline || ''))).join('')}</ul>` : ''}`;
+  showStatPopup(`${countryFlag(cc)} ${countryName(cc)}`, body);
+  $('stat-popup-body').dataset.country = cc;
+}
+
+async function setCountryStatus(cc, status) {
+  const name = countryName(cc);
+  const label = { visited: 'visité', stopover: 'escale seulement', land: 'visité sans avion', auto: 'calcul automatique', remove: 'retiré' }[status];
+  closeModal('stat-popup-modal');
+  const ok = await commitChange(() => {
+    if (status === 'auto' || status === 'remove') delete countryStatus[cc];
+    else countryStatus[cc] = status;
+  }, `Passeport : ${name}, ${label}`);
+  if (ok) { showToast(`${name} : ${label}.`); renderAll(); }
+}
+
+// Every country with an ISO code from the map outlines, in French, sorted
+function allCountries() {
+  const codes = typeof WORLD !== 'undefined' ? [...new Set(WORLD.countries.map(c => c.c).filter(Boolean))] : [];
+  return codes.map(cc => [cc, countryName(cc)]).sort((a, b) => a[1].localeCompare(b[1], 'fr'));
+}
+
+function openAddCountry() {
+  const known = new Set([...countryInfo().visited, ...countryInfo().stopover].map(r => r.cc));
+  const options = allCountries().filter(([cc]) => !known.has(cc))
+    .map(([cc, name]) => `<option value="${esc(cc)}">${countryFlag(cc)} ${esc(name)}</option>`).join('');
+  showStatPopup('Ajouter un pays visité sans avion', `
+    <p class="muted" style="margin-bottom:8px">Par exemple un pays visité en train, en voiture ou en bateau.</p>
+    <select class="country-select" id="add-country-select"><option value="">Choisir un pays…</option>${options}</select>
+    <div class="form-actions"><button type="button" class="btn btn-ghost" onclick="closeModal('stat-popup-modal')">Annuler</button>
+    <button type="button" class="btn btn-primary" onclick="const v=$('add-country-select').value; if(v) setCountryStatus(v,'land')">Ajouter</button></div>`);
+}
+
+// ─── Theme (per device) ───
+const THEMES = ['light', 'dark', 'auto'];
+const THEME_LABEL = { light: 'clair', dark: 'sombre', auto: 'automatique' };
+function currentTheme() { return document.documentElement.dataset.theme || 'light'; }
+function updateThemeButton() { if ($('theme-btn')) $('theme-btn').textContent = `Thème : ${THEME_LABEL[currentTheme()]}`; }
+function cycleTheme() {
+  const next = THEMES[(THEMES.indexOf(currentTheme()) + 1) % THEMES.length];
+  document.documentElement.dataset.theme = next;
+  try { localStorage.setItem('carnet_theme', next); } catch (e) {}
+  updateThemeButton();
+  renderAll();
+  showToast(`Thème ${THEME_LABEL[next]}.`);
 }
 
 // ═══════════════════════════════════════
@@ -523,6 +669,7 @@ function countryName(cc) {
   try { return new Intl.DisplayNames(['fr'], { type: 'region' }).of(cc) || cc; } catch (e) { return cc; }
 }
 function showStatPopup(title, html) {
+  delete $('stat-popup-body').dataset.country;
   $('stat-popup-title').textContent = title;
   $('stat-popup-body').innerHTML = html;
   $('stat-popup-modal').classList.add('open');
@@ -558,22 +705,10 @@ function showAirportsPopup() {
   showStatPopup('🏢 Aéroports', `<ul class="stat-popup-list">${rows}</ul>`);
 }
 
-function showCountriesPopup() {
-  if (!flights.length) return;
-  const by = {};
-  flights.forEach(f => [AIRPORTS[f.from]?.country, AIRPORTS[f.to]?.country].filter(Boolean).forEach(cc => { by[cc] = (by[cc] || 0) + 1; }));
-  const rows = Object.entries(by).sort((a, b) => b[1] - a[1]).map(([cc, n], i) => `<li>
-      <span class="stat-popup-rank">${i + 1}</span>
-      <span class="stat-popup-label">${countryFlag(cc)} ${esc(countryName(cc))}</span>
-      <span class="stat-popup-value">${n} passage${n > 1 ? 's' : ''}</span>
-    </li>`).join('');
-  showStatPopup('🗺️ Pays', `<ul class="stat-popup-list">${rows}</ul>`);
-}
-
 function showCO2Popup() {
   if (!flights.length) return;
   const rows = [...flights].sort((a, b) => co2Of(b) - co2Of(a))
-    .map((f, i) => flightLi(f, i, formatCO2(co2Of(f)), 'color:#86efac')).join('');
+    .map((f, i) => flightLi(f, i, formatCO2(co2Of(f)), 'color:var(--green)')).join('');
   showStatPopup('🌱 Vols par CO₂e (du plus élevé au plus faible)', `<ul class="stat-popup-list">${rows}</ul>`);
 }
 
@@ -880,11 +1015,17 @@ function renderMap() {
   Object.values(markerLayers).forEach(l => l.remove());
   routeLayers = {}; markerLayers = {};
 
-  // Visited countries
-  const visited = new Set(flights.flatMap(f => [AIRPORTS[f.from]?.country, AIRPORTS[f.to]?.country]).filter(Boolean));
+  // Countries coloured with the passport rules: visited, stopover only, or neither
+  const info = countryInfo();
+  const visited = new Set(info.visited.map(r => r.cc)), stopover = new Set(info.stopover.map(r => r.cc));
+  const look = {
+    visited: { fillColor: cssVar('--visited'), color: cssVar('--visited-line'), dashArray: null, weight: 0.8 },
+    stopover: { fillColor: cssVar('--stopover'), color: cssVar('--stopover-line'), dashArray: '3 3', weight: 0.8 },
+    other: { fillColor: cssVar('--land'), color: cssVar('--land-line'), dashArray: null, weight: 0.6 }
+  };
   for (const [cc, polys] of Object.entries(countryLayers)) {
-    const v = visited.has(cc);
-    polys.forEach(p => p.setStyle({ fillColor: cssVar(v ? '--visited' : '--land'), color: cssVar(v ? '--visited-line' : '--land-line') }));
+    const st = visited.has(cc) ? look.visited : stopover.has(cc) ? look.stopover : look.other;
+    polys.forEach(p => p.setStyle(st));
   }
 
   // One line per pair of airports, both directions together
@@ -912,7 +1053,7 @@ function renderMap() {
     const ap = AIRPORTS[code];
     const m = L.circleMarker([ap.lat, ap.lon], {
       radius: Math.min(5 + Math.sqrt(counts[code]) * 1.6, 15),
-      fillColor: cssVar('--marker'), color: cssVar('--marker-line'), weight: 2, opacity: 1, fillOpacity: 1
+      fillColor: cssVar('--marker'), color: cssVar('--marker-line'), weight: 2.5, opacity: 1, fillOpacity: 1
     });
     m.bindTooltip(`<b>${esc(code)}</b> ${esc(ap.city)}`, { direction: 'top', offset: [0, -6], className: 'map-tip' });
     m.on('click', e => { L.DomEvent.stopPropagation(e); showAirportPanel(code); });
@@ -1110,22 +1251,24 @@ function renderJournal() {
         const dates = t.start === t.end ? formatDate(t.start) : `du ${formatDate(t.start)} au ${formatDate(t.end)} · ${days} jours`;
         return `<article class="j-trip">
           <div class="j-trip-head">
-            <div class="j-trip-title"><span class="j-trip-flags">${t.countries.map(countryFlag).join(' ')}</span>${esc(t.places.join(' · '))}</div>
-            <div class="j-trip-sub">${dates}${t.via.length ? ` · via ${esc(t.via.join(', '))}` : ''}${t.people.length ? `<br>avec ${esc(t.people.join(', '))}` : ''}</div>
+            <div class="j-trip-title">${t.countries.length ? `<span class="j-trip-flags">${t.countries.map(countryFlag).join(' ')}</span>` : ''}${esc(t.places.join(' · '))}</div>
+            <div class="j-trip-sub">${dates}${t.via.length ? ` · via ${esc(t.via.join(', '))}` : ''}</div>
+            ${t.people.length ? `<div class="j-people">${t.people.map(p => `<span>${esc(p)}</span>`).join('')}</div>` : ''}
           </div>
-          <ol class="j-flights">${t.flights.map(f => {
-            const meta = [[f.airline, f.flightNumber].filter(Boolean).join(' '), f.aircraftType, f.seat ? 'siège ' + f.seat : '', fmtDur(f.durationMin)].filter(Boolean);
-            return `<li class="j-flight" data-flight="${esc(f.id)}" tabindex="0" role="button" aria-label="Voir le vol ${esc(f.from)} vers ${esc(f.to)} du ${formatDate(f.date)}">
-              <div class="j-line">
-                <span class="j-date">${formatDate(f.date)}</span>
-                <span class="j-route">${esc(f.from)} → ${esc(f.to)}</span>
-                <span class="j-cities">${esc(city(f.from))} → ${esc(city(f.to))}</span>
+          <ol class="j-flights">${t.flights.map(f => `<li class="pass j-flight" data-flight="${esc(f.id)}" tabindex="0" role="button" aria-label="Voir le vol ${esc(f.from)} vers ${esc(f.to)} du ${formatDate(f.date)}">
+              <div class="pass-main">
+                <div class="pass-top"><span>${formatDate(f.date)}${f.departureTime ? ' · ' + esc(f.departureTime) : ''}</span><span>${esc([f.airline, f.flightNumber].filter(Boolean).join(' '))}</span></div>
+                <div class="pass-route"><b>${esc(f.from)}</b><span class="line"></span><b>${esc(f.to)}</b></div>
+                <div class="pass-cities"><span>${esc(city(f.from))}</span><span>${esc(city(f.to))}</span></div>
+                ${f.notes ? `<p class="j-notes">${esc(f.notes)}</p>` : ''}
+                ${f.photo ? `<div class="j-photo" data-photo="${esc(f.photo)}"></div>` : ''}
               </div>
-              <div class="j-meta">${esc(meta.join(' · '))}</div>
-              ${f.notes ? `<p class="j-notes">${esc(f.notes)}</p>` : ''}
-              ${f.photo ? `<div class="j-photo" data-photo="${esc(f.photo)}"></div>` : ''}
-            </li>`;
-          }).join('')}</ol>
+              <div class="stub">
+                <div><div class="k">siège</div><div class="v">${esc(f.seat || '–')}</div></div>
+                <div><div class="k">durée</div><div class="v sm">${f.durationMin ? fmtDur(f.durationMin) : '–'}</div></div>
+                ${f.aircraftType ? `<div><div class="k">avion</div><div class="t">${esc(f.aircraftType)}</div></div>` : ''}
+              </div>
+            </li>`).join('')}</ol>
         </article>`;
       }).join('')}`;
   }).join('');
@@ -1187,12 +1330,12 @@ function renderAnalytics() {
     const opts = {
       responsive: true, plugins: { legend: { display: false } },
       scales: {
-        x: { ticks: { color: '#94a3b8' }, grid: { color: '#1e2d47' } },
-        y: { ticks: { color: '#94a3b8', precision: 0 }, grid: { color: '#1e2d47' }, beginAtZero: true }
+        x: { ticks: { color: cssVar('--text3') }, grid: { color: cssVar('--border') } },
+        y: { ticks: { color: cssVar('--text3'), precision: 0 }, grid: { color: cssVar('--border') }, beginAtZero: true }
       }
     };
-    charts.push(new Chart($('chart-year'), { type: 'bar', data: { labels: years, datasets: [{ label: 'Vols', data: years.map(y => byYear[y]), backgroundColor: '#3b82f6', borderRadius: 6 }] }, options: opts }));
-    charts.push(new Chart($('chart-dist'), { type: 'bar', data: { labels: years, datasets: [{ label: 'km', data: years.map(y => distByYear[y] || 0), backgroundColor: '#10b981', borderRadius: 6 }] }, options: opts }));
+    charts.push(new Chart($('chart-year'), { type: 'bar', data: { labels: years, datasets: [{ label: 'Vols', data: years.map(y => byYear[y]), backgroundColor: cssVar('--accent'), borderRadius: 6 }] }, options: opts }));
+    charts.push(new Chart($('chart-dist'), { type: 'bar', data: { labels: years, datasets: [{ label: 'km', data: years.map(y => distByYear[y] || 0), backgroundColor: cssVar('--green'), borderRadius: 6 }] }, options: opts }));
   }
 
   const bar = (n, max, color) => `<div class="bar-wrap"><div class="bar" style="width:${(n / max * 100).toFixed(0)}%;background:${color}"></div></div>`;
@@ -1985,6 +2128,14 @@ document.addEventListener('keydown', e => {
   const open = document.querySelectorAll('.modal-overlay.open');
   if (open.length) open.forEach(m => closeModal(m.id)); else closeMapPanel();
 });
+$('passport').addEventListener('click', e => {
+  const stamp = e.target.closest('[data-country]');
+  if (stamp) openCountrySheet(stamp.dataset.country);
+});
+$('stat-popup-body').addEventListener('click', e => {
+  const b = e.target.closest('[data-set-status]');
+  if (b && $('stat-popup-body').dataset.country) setCountryStatus($('stat-popup-body').dataset.country, b.dataset.setStatus);
+});
 $('journal').addEventListener('click', e => {
   const item = e.target.closest('.j-flight');
   if (item) openFlightDetail(item.dataset.flight);
@@ -2003,6 +2154,7 @@ $('map-panel').addEventListener('click', e => {
 });
 
 async function init() {
+  updateThemeButton();
   cfg = readCfg();
   if (!cfg) { showSetup(); return; }
   showApp();
