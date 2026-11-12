@@ -1181,7 +1181,7 @@ function renderAnalytics() {
     <div class="chart-card"><div class="chart-title">🛤️ Trajets les plus fréquents</div><ul class="top-list" id="top-routes"></ul></div>
     ${topAirlines.length ? '<div class="chart-card" style="grid-column:1/-1"><div class="chart-title">🛫 Compagnies</div><ul class="top-list" id="top-airlines"></ul></div>' : ''}
     ${topAircraft.length ? '<div class="chart-card" style="grid-column:1/-1"><div class="chart-title">🛩 Types d\'avion</div><ul class="top-list" id="top-aircraft"></ul></div>' : ''}
-    <div class="chart-card" style="grid-column:1/-1"><div class="chart-title">💺 Sièges occupés</div><div id="seat-heatmap"></div></div>`;
+    <div class="chart-card" style="grid-column:1/-1"><div class="chart-title">💺 Places à bord</div><div id="seat-summary"></div></div>`;
 
   if (typeof Chart !== 'undefined') {
     const opts = {
@@ -1219,54 +1219,81 @@ function renderAnalytics() {
   };
   simple('top-airlines', topAirlines, 'var(--green)');
   simple('top-aircraft', topAircraft, 'var(--purple)');
-  renderSeatHeatmap();
+  renderSeatSummary();
 }
 
-function renderSeatHeatmap() {
-  const el = $('seat-heatmap');
-  const seats = {};
-  flights.forEach(f => {
-    const m = (f.seat || '').trim().toUpperCase().match(/^(\d+)([A-K])$/);
-    if (m) { const k = `${parseInt(m[1])}-${m[2]}`; seats[k] = (seats[k] || 0) + 1; }
-  });
-  const keys = Object.keys(seats);
-  if (!keys.length) {
+// Window, middle or aisle: the same letter means different places on different
+// aircraft, so the cabin layout is chosen from the aircraft type.
+const SEAT_LAYOUTS = {
+  // 2 + 2 (Embraer E-Jets, ATR, Dash 8, CRJ). Letters are A C | D F, or A B | C D on some airlines
+  regional: { window: 'AF', aisle: 'BCD', middle: '' },
+  // 2 + 3 (Airbus A220)
+  a220: { window: 'AF', aisle: 'CD', middle: 'E' },
+  // 3 + 3 (A318 to A321, Boeing 737 and 757)
+  narrow: { window: 'AF', aisle: 'CD', middle: 'BE' },
+  // 3 + 3 + 3 (Boeing 787, Airbus A350)
+  w333: { window: 'AK', aisle: 'CDFG', middle: 'BEHJ' },
+  // 3 + 4 + 3 (Boeing 777 and 747, Airbus A380)
+  w343: { window: 'AK', aisle: 'CDGH', middle: 'BEFJ' },
+  // 2 + 4 + 2 or 2 + 3 + 2 (Airbus A330 and A340, Boeing 767)
+  w242: { window: 'AKL', aisle: 'CDGH', middle: 'EF' }
+};
+function seatLayout(type) {
+  const t = norm(type).replace(/\s+/g, '');
+  if (/EMBRAER|^E1[79]\d|^E2|ERJ|EMB|ATR|DASH|DHC|Q400|CRJ/.test(t)) return SEAT_LAYOUTS.regional;
+  if (/A220|CS[13]00|BCS/.test(t)) return SEAT_LAYOUTS.a220;
+  if (/787|A350/.test(t)) return SEAT_LAYOUTS.w333;
+  if (/777|747|A380/.test(t)) return SEAT_LAYOUTS.w343;
+  if (/A33\d|A34\d|767/.test(t)) return SEAT_LAYOUTS.w242;
+  return SEAT_LAYOUTS.narrow;
+}
+function seatPosition(f) {
+  const m = (f.seat || '').trim().toUpperCase().match(/^(\d{1,3})([A-L])$/);
+  if (!m) return null;
+  const L = seatLayout(f.aircraftType), letter = m[2];
+  const pos = L.window.includes(letter) ? 'window' : L.aisle.includes(letter) ? 'aisle' : L.middle.includes(letter) ? 'middle' : null;
+  return { row: +m[1], letter, pos };
+}
+
+function renderSeatSummary() {
+  const el = $('seat-summary');
+  const seated = flights.map(f => ({ f, s: seatPosition(f) })).filter(x => x.s);
+  if (!seated.length) {
     el.innerHTML = '<p style="color:var(--text3);font-size:13px;padding:8px 0">Aucun siège enregistré. Ajoutez le numéro de siège (ex. 14A) dans vos vols.</p>';
     return;
   }
-  const rows = keys.map(k => parseInt(k.split('-')[0]));
-  const cols = [...new Set(keys.map(k => k.split('-')[1]))].sort();
-  const minRow = Math.min(...rows), maxRow = Math.max(...rows), maxCnt = Math.max(...Object.values(seats));
-  const isWide = cols.some(c => 'GHJK'.includes(c));
-  const aisleAfter = isWide ? new Set(['C', 'G']) : new Set(['C']);
-  const rgb = t => `rgb(${Math.round(29 + t * 216)},${Math.round(78 + t * 80)},${Math.round(216 - t * 205)})`;
-  const third = Math.floor((maxRow - minRow + 1) / 3);
-
-  let html = `<div style="overflow-x:auto;padding-bottom:6px"><table style="width:auto;border-collapse:separate;border-spacing:2px;margin:0 auto;font-size:11px">
-    <thead><tr><td style="padding:0 8px 6px 0;border:none;color:var(--text3);font-size:10px;text-align:right">Rang</td>`;
-  for (const c of cols) {
-    html += `<td style="border:none;text-align:center;font-weight:700;color:var(--text3);padding:0 1px 6px;min-width:26px">${c}</td>`;
-    if (aisleAfter.has(c)) html += '<td style="border:none;min-width:10px;padding:0"></td>';
-  }
-  html += '<td style="border:none;padding:0"></td></tr></thead><tbody>';
-  for (let row = minRow; row <= maxRow; row++) {
-    const label = row === minRow ? '← avant' : row === minRow + third ? '← milieu' : row === maxRow - third + 1 ? '← arrière' : '';
-    html += `<tr><td style="border:none;text-align:right;padding:0 8px 0 0;color:var(--text3);font-size:10px;line-height:20px">${row}</td>`;
-    for (const c of cols) {
-      const n = seats[`${row}-${c}`] || 0;
-      html += `<td title="${row}${c}${n ? ` : ${n} vol${n > 1 ? 's' : ''}` : ''}" style="border:none;padding:0;width:26px;height:20px;background:${n ? rgb(n / maxCnt) : 'rgba(15,23,42,0.8)'};border-radius:3px;text-align:center;font-size:10px;font-weight:700;color:rgba(255,255,255,.9)">${n || ''}</td>`;
-      if (aisleAfter.has(c)) html += '<td style="border:none;padding:0;width:10px"></td>';
-    }
-    html += `<td style="border:none;padding:0 0 0 10px;color:var(--text3);font-size:10px;white-space:nowrap;font-style:italic">${label}</td></tr>`;
-  }
-  html += `</tbody></table></div>
-    <div style="display:flex;align-items:center;gap:6px;margin-top:14px;justify-content:center;flex-wrap:wrap;font-size:11px;color:var(--text3)">
-      <div style="width:26px;height:14px;background:rgba(15,23,42,0.8);border-radius:2px;border:1px solid var(--border)"></div><span>0×</span>
-      ${[0, 0.25, 0.5, 0.75, 1].map(t => `<div style="width:26px;height:14px;background:${rgb(t)};border-radius:2px"></div>`).join('')}
-      <span>${maxCnt}×</span>
-      <span style="margin-left:10px;font-style:italic">${keys.length} siège${keys.length > 1 ? 's' : ''} différent${keys.length > 1 ? 's' : ''} · ${isWide ? 'avion à deux couloirs' : 'avion à un couloir'}</span>
+  const count = { window: 0, middle: 0, aisle: 0 };
+  seated.forEach(x => { if (x.s.pos) count[x.s.pos]++; });
+  const classified = count.window + count.middle + count.aisle;
+  const pct = n => classified ? Math.round(n / classified * 100) : 0;
+  const tile = (key, icon, label) => `<div class="seat-tile seat-${key}">
+      <div class="seat-icon">${icon}</div>
+      <div class="seat-n">${count[key]}</div>
+      <div class="seat-label">${label}</div>
+      <div class="seat-bar"><div style="width:${pct(count[key])}%"></div></div>
+      <div class="seat-pct">${pct(count[key])} %</div>
     </div>`;
-  el.innerHTML = html;
+
+  const bySeat = {};
+  seated.forEach(x => { const k = x.s.row + x.s.letter; bySeat[k] = (bySeat[k] || 0) + 1; });
+  const [favSeat, favN] = Object.entries(bySeat).sort((a, b) => b[1] - a[1])[0];
+  const rows = seated.map(x => x.s.row);
+  const avgRow = Math.round(rows.reduce((s, r) => s + r, 0) / rows.length);
+  const missing = flights.length - seated.length;
+  const unclassified = seated.length - classified;
+
+  el.innerHTML = `<div class="seat-tiles">
+      ${tile('window', '🪟', 'côté hublot')}
+      ${tile('middle', '💺', 'au milieu')}
+      ${tile('aisle', '🚶', 'côté couloir')}
+    </div>
+    <ul class="seat-facts">
+      <li>Siège le plus fréquent : <b>${esc(favSeat)}</b>${favN > 1 ? ` (${favN} fois)` : ''}</li>
+      <li>Rang moyen : <b>${avgRow}</b> (le plus à l'avant : ${Math.min(...rows)}, le plus à l'arrière : ${Math.max(...rows)})</li>
+      ${missing ? `<li>${plural(missing, 'vol', 'vols')} sans siège enregistré</li>` : ''}
+      ${unclassified ? `<li>${plural(unclassified, 'siège non classé', 'sièges non classés')} (lettre inattendue pour ce type d'avion)</li>` : ''}
+    </ul>
+    <p class="seat-note">La position dépend de la cabine : sur un Embraer, la lettre B est côté couloir ; sur un Boeing 737, c'est la place du milieu.</p>`;
 }
 
 // ═══════════════════════════════════════
