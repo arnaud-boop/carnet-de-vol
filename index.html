@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="robots" content="noindex, nofollow">
   <!-- Version du site : la changer ici ET dans version.txt a chaque mise a jour -->
-  <meta name="app-version" content="2026-11-12.9">
+  <meta name="app-version" content="2026-11-12.10">
   <title>Carnet de vol</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9C%88%EF%B8%8F%3C/text%3E%3C/svg%3E">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/maplibre-gl/5.24.0/maplibre-gl.css">
@@ -215,6 +215,12 @@
     #map-panel-body{overflow-y:auto;padding:18px;flex:1;min-height:0;}
     .mp-close{position:absolute;top:10px;right:10px;width:30px;height:30px;border-radius:50%;border:1px solid var(--border);background:var(--bg3);color:var(--text2);cursor:pointer;font-size:14px;z-index:1;}
     .mp-close:hover{color:var(--text);border-color:var(--accent);}
+    .mp-photo{margin:-18px -18px 14px;border-radius:15px 15px 0 0;overflow:hidden;background:var(--bg3);min-height:170px;position:relative;}
+    .mp-photo img{display:block;width:100%;height:170px;object-fit:cover;opacity:0;transition:opacity .3s;}
+    .mp-photo.loaded img{opacity:1;}
+    .mp-photo .credit{position:absolute;left:0;right:0;bottom:0;padding:14px 10px 5px;font-size:10px;line-height:1.3;color:#fff;background:linear-gradient(transparent,rgba(0,0,0,.6));text-decoration:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+    .mp-photo .credit:hover{text-decoration:underline;}
+    .mp-close{box-shadow:0 1px 4px rgba(0,0,0,.2);}
     .mp-head{display:flex;gap:12px;align-items:center;margin-bottom:12px;padding-right:34px;}
     .mp-code{font-family:var(--mono);font-size:26px;font-weight:500;letter-spacing:-.5px;color:var(--accent2);line-height:1;}
     .mp-code-route span{color:var(--text3);margin:0 6px;font-weight:400;}
@@ -303,6 +309,8 @@
     .top-list .rank{font-size:11px;color:var(--text3);width:20px;flex-shrink:0;font-family:var(--mono);}
     .top-list .bar-wrap{flex:1;background:var(--bg3);border-radius:4px;height:6px;min-width:30px;}
     .top-list .bar{height:6px;border-radius:4px;background:var(--accent);}
+    .more-btn{margin-top:10px;background:none;border:1px solid var(--border);border-radius:999px;padding:5px 14px;font:500 12px var(--sans);color:var(--text2);cursor:pointer;}
+    .more-btn:hover{border-color:var(--accent);color:var(--text);}
     .top-list .count{font-size:12px;color:var(--text3);min-width:28px;text-align:right;font-variant-numeric:tabular-nums;}
 
     /* Modals */

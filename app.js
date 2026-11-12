@@ -1230,6 +1230,7 @@ function showAirportPanel(code) {
   list.forEach(f => { const o = f.from === code ? f.to : f.from; links[o] = (links[o] || 0) + 1; });
   const first = list[list.length - 1], last = list[0];
   openMapPanel(`
+    <div class="mp-photo" data-airport-photo="${esc(code)}"></div>
     <div class="mp-head">
       <div class="mp-code">${esc(code)}</div>
       <div>
@@ -1248,6 +1249,60 @@ function showAirportPanel(code) {
       `<button type="button" class="mp-chip" data-route="${esc(routeKey(code, o))}"><b>${esc(o)}</b> ${esc(city(o))} <span>×${n}</span></button>`).join('')}</div>
     <div class="mp-label">Vols</div>
     ${flightRows(list, code)}`, { type: 'airport', code });
+  loadAirportPhoto(code);
+}
+
+// ─── Airport photo: the main image of the airport on Wikidata, served by Wikimedia Commons ───
+const airportPhotoCache = new Map();   // IATA code -> Promise of { src, page, credit } or null
+
+function plainText(html) {
+  return (new DOMParser().parseFromString(String(html || ''), 'text/html').body.textContent || '').replace(/\s+/g, ' ').trim();
+}
+
+function fetchAirportPhoto(code) {
+  if (airportPhotoCache.has(code)) return airportPhotoCache.get(code);
+  const job = (async () => {
+    if (!/^[A-Z0-9]{3}$/.test(code)) return null;
+    const query = `SELECT ?img WHERE { ?a wdt:P238 "${code}" ; wdt:P18 ?img . } LIMIT 1`;
+    const r = await fetch(`https://query.wikidata.org/sparql?format=json&query=${encodeURIComponent(query)}`, { headers: { Accept: 'application/sparql-results+json' } });
+    if (!r.ok) return null;
+    const url = (await r.json())?.results?.bindings?.[0]?.img?.value;
+    if (!url) return null;
+    const file = decodeURIComponent(url.split('/').pop());
+    const api = 'https://commons.wikimedia.org/w/api.php?action=query&format=json&origin=*&prop=imageinfo&iiprop=url%7Cextmetadata'
+      + '&iiurlwidth=800&iiextmetadatafilter=Artist%7CLicenseShortName&titles=' + encodeURIComponent('File:' + file);
+    const m = await fetch(api);
+    if (!m.ok) return null;
+    const info = Object.values((await m.json())?.query?.pages || {})[0]?.imageinfo?.[0];
+    const src = info?.thumburl || info?.url;
+    if (!src || !/^https:\/\/[a-z.]*wikimedia\.org\//.test(src)) return null;
+    const page = /^https:\/\/commons\.wikimedia\.org\//.test(info.descriptionurl || '') ? info.descriptionurl : 'https://commons.wikimedia.org';
+    const artist = plainText(info.extmetadata?.Artist?.value), license = plainText(info.extmetadata?.LicenseShortName?.value);
+    return { src, page, credit: [artist, license].filter(Boolean).join(' · ') };
+  })().catch(() => null);
+  airportPhotoCache.set(code, job);
+  // A failed lookup may be retried later (for example after a network error)
+  job.then(res => { if (!res) setTimeout(() => airportPhotoCache.delete(code), 60000); });
+  return job;
+}
+
+async function loadAirportPhoto(code) {
+  const box = () => document.querySelector(`#map-panel-body [data-airport-photo="${code}"]`);
+  if (!box()) return;
+  const res = await fetchAirportPhoto(code);
+  const el = box();
+  if (!el) return;
+  if (!res) { el.remove(); return; }
+  const img = new Image();
+  img.alt = `Photo de l'aéroport ${code}`;
+  img.onload = () => el.classList.add('loaded');
+  img.onerror = () => el.remove();
+  img.src = res.src;
+  const credit = document.createElement('a');
+  credit.className = 'credit';
+  credit.href = res.page; credit.target = '_blank'; credit.rel = 'noopener';
+  credit.textContent = `Photo : ${res.credit || 'auteur inconnu'} · Wikimedia Commons`;
+  el.replaceChildren(img, credit);
 }
 
 function showRoutePanel(key) {
@@ -1403,9 +1458,9 @@ function renderAnalytics() {
     const ac = f.aircraftType || f.registration;
     if (ac) byAircraft[ac] = (byAircraft[ac] || 0) + 1;
   });
-  const top = (o, n) => Object.entries(o).sort((a, b) => b[1] - a[1]).slice(0, n);
+  const top = o => Object.entries(o).sort((a, b) => b[1] - a[1]);   // full lists; the first 8 show, the rest behind "Voir tout"
   const years = Object.keys(byYear).sort();
-  const topAirlines = top(byAirline, 8), topAirports = top(byAirport, 8), topAircraft = top(byAircraft, 8), topRoutes = top(byRoute, 10);
+  const topAirlines = top(byAirline), topAirports = top(byAirport), topAircraft = top(byAircraft), topRoutes = top(byRoute);
 
   container.innerHTML = `
     <div class="chart-card"><div class="chart-title">✈️ Vols par année</div><canvas id="chart-year"></canvas></div>
@@ -1452,7 +1507,29 @@ function renderAnalytics() {
   };
   simple('top-airlines', topAirlines, 'var(--green)');
   simple('top-aircraft', topAircraft, 'var(--purple)');
+  ['top-airports', 'top-routes', 'top-airlines', 'top-aircraft'].forEach(id => addShowMore(id, 8));
   renderSeatSummary();
+}
+
+// Shows the first items of a list and a button for the rest. The choice is kept while the page is open.
+const expandedLists = new Set();
+function addShowMore(id, limit) {
+  const ul = $(id);
+  if (!ul) return;
+  const items = [...ul.children];
+  if (items.length <= limit) return;
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'more-btn';
+  const apply = () => {
+    const open = expandedLists.has(id);
+    items.forEach((li, i) => { if (i >= limit) li.hidden = !open; });
+    btn.textContent = open ? 'Voir moins' : `Voir tout (${items.length})`;
+    btn.setAttribute('aria-expanded', String(open));
+  };
+  btn.onclick = () => { if (expandedLists.has(id)) expandedLists.delete(id); else expandedLists.add(id); apply(); };
+  ul.after(btn);
+  apply();
 }
 
 // Window, middle or aisle: the same letter means different places on different
