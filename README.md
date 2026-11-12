@@ -15,7 +15,8 @@ Deux carnets dans le meme depot de donnees, avec la meme cle :
   le nombre de vols dans le sens `from` vers `to` (`abEst` : repartition estimee).
   `airportAirlines` donne les compagnies prises dans chaque aeroport. `airline`
   donne la compagnie d'un trajet quand elle se deduit de ces listes
-  (`airlineEst` : seulement probable).
+  (`airlineEst` : seulement probable). `airlineMix` repartit les vols d'un
+  trajet entre plusieurs compagnies, quand on peut les deduire par elimination.
 
 Le bouton Liv / Arnaud en haut de la page change de carnet. Chaque appareil
 retient le dernier carnet ouvert. Les adresses `#liv` et `#arnaud` ouvrent

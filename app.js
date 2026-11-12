@@ -27,7 +27,8 @@ let cfg = null;
 let flights = [];
 let routes = [];                      // history without dates: { from, to, count, distKm, ab, abEst, airline, airlineEst } (Arnaud)
                                       // ab: flights from -> to (the others go to -> from); abEst: that split is an estimate
-                                      // airline: deduced from the airlines per airport; airlineEst: only probable
+                                      // airline: deduced from the airlines per airport; airlineMix: { airline: flights } when
+                                      // several airlines share the flights of a route; airlineEst: only probable
 let airlinesList = [];                // airlines of the history, without counts
 let airportAirlines = {};             // history: airport code -> airlines taken there
 let historyUntil = '';                // last day covered by the history (YYYY-MM-DD)
@@ -226,7 +227,14 @@ function applyDoc(doc) {
     };
     if (Number.isInteger(r?.ab) && r.ab >= 0 && r.ab <= x.count) { x.ab = r.ab; if (r.abEst) x.abEst = true; }
     const al = String(r?.airline || '').trim();
-    if (al) { x.airline = al; if (r.airlineEst) x.airlineEst = true; }
+    const mix = {};
+    if (r?.airlineMix && typeof r.airlineMix === 'object') {
+      for (const [name, n] of Object.entries(r.airlineMix)) if (String(name).trim() && Number.isInteger(n) && n > 0) mix[String(name).trim()] = n;
+    }
+    const mixTotal = Object.values(mix).reduce((t, n) => t + n, 0);
+    if (al) x.airline = al;
+    else if (mixTotal && mixTotal <= x.count) x.airlineMix = mix;
+    if ((x.airline || x.airlineMix) && r.airlineEst) x.airlineEst = true;
     return x;
   }).filter(r => /^[A-Z0-9]{3,4}$/.test(r.from) && /^[A-Z0-9]{3,4}$/.test(r.to) && r.count > 0);
   airlinesList = (Array.isArray(obj.airlines) ? obj.airlines : []).map(s => String(s || '').trim()).filter(Boolean);
@@ -289,6 +297,7 @@ function legMap(list, withHistory) {
   if (withHistory) routes.forEach(r => {
     add(r.from, r.to, r.count, r.distKm, r.ab ?? null, r.abEst);
     if (r.airline) addAl(m[routeKey(r.from, r.to)], r.airline, r.count, r.airlineEst);
+    else if (r.airlineMix) Object.entries(r.airlineMix).forEach(([name, n]) => addAl(m[routeKey(r.from, r.to)], name, n, r.airlineEst));
   });
   list.forEach(f => {
     add(f.from, f.to, 1, f.distKm || getDistance(f.from, f.to), 1);
@@ -1874,8 +1883,11 @@ function routeAirlinesNote(leg) {
   const known = list.reduce((s, [, v]) => s + v.n, 0);
   const est = list.some(([, v]) => v.est);
   const names = list.map(([name, v]) => list.length > 1 || known < leg.n ? `${esc(name)} ×${v.n}` : esc(name)).join(', ');
-  const fromHist = routes.some(r => routeKey(r.from, r.to) === leg.key && r.airline);
-  const why = !fromHist ? '' : est ? ' (probable : seule compagnie commune aux deux aéroports dans l\'Excel)' : ' (déduite de l\'Excel : la seule possible)';
+  const hr = routes.find(r => routeKey(r.from, r.to) === leg.key && (r.airline || r.airlineMix));
+  const common = hr && (AA => { const a = AA[hr.from] || [], b = AA[hr.to] || []; return a.filter(x => b.includes(x)).length === 1; })(airportAirlines);
+  const why = !hr ? '' : !est ? ' (déduite de l\'Excel : la seule possible)'
+    : common ? ' (probable : seule compagnie commune aux deux aéroports dans l\'Excel)'
+    : ' (probable, par élimination : dans l\'Excel, aucun autre trajet de ces aéroports ne peut l\'expliquer)';
   return `<div class="mp-note">${list.length > 1 ? 'Compagnies' : 'Compagnie'} : ${names}${why}.${known < leg.n ? ` Inconnue pour ${plural(leg.n - known, 'vol', 'vols')}.` : ''}</div>`;
 }
 
