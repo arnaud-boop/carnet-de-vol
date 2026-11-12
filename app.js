@@ -600,6 +600,10 @@ function showDistancePopup() {
 // ═══════════════════════════════════════
 function renderFlightsTable() {
   updateYearFilter();
+  // The class column and filter appear only when the logbook has more than one class
+  const multiClass = new Set(flights.map(f => f.cabinClass)).size > 1;
+  $('filter-class').hidden = !multiClass;
+  if (!multiClass) $('filter-class').value = '';
   const search = norm($('search-input').value);
   const year = $('filter-year').value, cls = $('filter-class').value;
 
@@ -636,10 +640,9 @@ function renderFlightsTable() {
       <th class="col-wide">Avion</th>
       ${col('distKm', 'Distance')}
       ${col('co2kg', 'CO₂e', 'col-wide')}
-      <th class="col-wide">Classe</th>
-      <th class="col-wide">Actions</th>
+      ${multiClass ? '<th class="col-wide">Classe</th>' : ''}
     </tr></thead>
-    <tbody>${filtered.map(f => `<tr class="flight-row" onclick="openFlightDetail('${f.id}')">
+    <tbody>${filtered.map(f => `<tr class="flight-row" tabindex="0" onclick="openFlightDetail('${f.id}')" onkeydown="if(event.key==='Enter')openFlightDetail('${f.id}')" title="Voir, modifier ou supprimer ce vol">
       <td class="nowrap">${formatDate(f.date)}</td>
       <td>
         <div class="route">${esc(f.from || '?')} → ${esc(f.to || '?')}</div>
@@ -649,11 +652,7 @@ function renderFlightsTable() {
       <td class="col-wide"><div style="font-size:13px">${esc(f.aircraftType || '–')}</div>${f.registration ? `<div style="font-size:11px;color:var(--text3)">${esc(f.registration)}</div>` : ''}</td>
       <td class="nowrap">${formatDist(f.distKm)}</td>
       <td class="co2-cell col-wide">${formatCO2(co2Of(f))}</td>
-      <td class="col-wide">${classBadge(f.cabinClass)}</td>
-      <td class="col-wide" onclick="event.stopPropagation()"><div class="actions-col">
-        <button class="btn btn-secondary btn-sm" onclick="openModal('${f.id}')">Modifier</button>
-        <button class="btn btn-danger btn-sm" onclick="deleteFlight('${f.id}')">Suppr.</button>
-      </div></td>
+      ${multiClass ? `<td class="col-wide">${classBadge(f.cabinClass)}</td>` : ''}
     </tr>`).join('')}</tbody>
   </table>`;
 }

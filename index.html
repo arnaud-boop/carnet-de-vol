@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="robots" content="noindex, nofollow">
   <!-- Version du site : la changer ici ET dans version.txt a chaque mise a jour -->
-  <meta name="app-version" content="2026-11-12.5">
+  <meta name="app-version" content="2026-11-12.6">
   <title>SkyLog · Carnet de vol</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9C%88%EF%B8%8F%3C/text%3E%3C/svg%3E">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
@@ -106,7 +106,6 @@
     .badge-first{background:rgba(192,132,252,.15);color:var(--purple);}
     .route{font-weight:600;font-size:15px;white-space:nowrap;}
     .route-detail{font-size:11px;color:var(--text3);margin-top:2px;}
-    .actions-col{display:flex;gap:6px;}
     .empty-state{text-align:center;padding:60px 20px;color:var(--text3);}
     .empty-state .emoji{font-size:48px;margin-bottom:12px;}
     .empty-state p{font-size:15px;margin-bottom:20px;}
@@ -300,7 +299,8 @@
       #toast{left:16px;right:16px;bottom:16px;text-align:center;}
     }
     @media(max-width:480px){
-      .nav-tab{padding:10px 10px;font-size:13px;}
+      nav{gap:0;}
+      .nav-tab{padding:10px 8px;font-size:13px;flex:1 0 auto;}
       .detail-grid{grid-template-columns:1fr;}
       .detail-route{font-size:20px;}
       .logo{font-size:16px;}
