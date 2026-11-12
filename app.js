@@ -25,8 +25,10 @@ const otherCarnet = () => (carnet === 'liv' ? 'arnaud' : 'liv');
 
 let cfg = null;
 let flights = [];
-let routes = [];                      // history without dates: { from, to, count, distKm } (Arnaud)
+let routes = [];                      // history without dates: { from, to, count, distKm, ab, abEst } (Arnaud)
+                                      // ab: flights from -> to (the others go to -> from); abEst: that split is an estimate
 let airlinesList = [];                // airlines of the history, without counts
+let airportAirlines = {};             // history: airport code -> airlines taken there
 let historyUntil = '';                // last day covered by the history (YYYY-MM-DD)
 let countryStatus = {};               // passport: country code -> 'visited' | 'stopover' | 'land'
 let dataSha = null;                  // version of the data file this device last saw
@@ -216,11 +218,23 @@ function applyDoc(doc) {
   addAirports(doc.airports);
   flights = list.map(normalizeFlight).filter(Boolean);
   const obj = Array.isArray(doc) ? {} : doc;
-  routes = (Array.isArray(obj.routes) ? obj.routes : []).map(r => ({
-    from: String(r?.from || '').toUpperCase(), to: String(r?.to || '').toUpperCase(),
-    count: Math.max(0, Math.round(+r?.count || 0)), distKm: Math.max(0, Math.round(+r?.distKm || 0))
-  })).filter(r => /^[A-Z0-9]{3,4}$/.test(r.from) && /^[A-Z0-9]{3,4}$/.test(r.to) && r.count > 0);
+  routes = (Array.isArray(obj.routes) ? obj.routes : []).map(r => {
+    const x = {
+      from: String(r?.from || '').toUpperCase(), to: String(r?.to || '').toUpperCase(),
+      count: Math.max(0, Math.round(+r?.count || 0)), distKm: Math.max(0, Math.round(+r?.distKm || 0))
+    };
+    if (Number.isInteger(r?.ab) && r.ab >= 0 && r.ab <= x.count) { x.ab = r.ab; if (r.abEst) x.abEst = true; }
+    return x;
+  }).filter(r => /^[A-Z0-9]{3,4}$/.test(r.from) && /^[A-Z0-9]{3,4}$/.test(r.to) && r.count > 0);
   airlinesList = (Array.isArray(obj.airlines) ? obj.airlines : []).map(s => String(s || '').trim()).filter(Boolean);
+  airportAirlines = {};
+  const aa = obj.airportAirlines;
+  if (aa && typeof aa === 'object') {
+    for (const [c, list] of Object.entries(aa)) {
+      const names = Array.isArray(list) ? list.map(s => String(s || '').trim()).filter(Boolean) : [];
+      if (/^[A-Z0-9]{3,4}$/.test(c) && names.length) airportAirlines[c] = names;
+    }
+  }
   historyUntil = /^\d{4}-\d{2}-\d{2}$/.test(obj.historyUntil || '') ? obj.historyUntil : '';
   countryStatus = {};
   const cs = obj.countryStatus;
@@ -243,6 +257,7 @@ function buildDoc() {
   if (routes.length) {
     doc.routes = routes;
     if (airlinesList.length) doc.airlines = airlinesList;
+    if (Object.keys(airportAirlines).length) doc.airportAirlines = airportAirlines;
     if (historyUntil) doc.historyUntil = historyUntil;
   }
   const cs = Object.keys(countryStatus).sort();
@@ -252,24 +267,31 @@ function buildDoc() {
 
 // Every pair of airports flown, both directions together: { key: { a, b, n, km } }.
 // km is the distance of one flight. The history counts when withHistory is true.
+// ab / ba: flights from a to b / from b to a; unk: flights whose direction is not known; est: the split is an estimate.
 function legMap(list, withHistory) {
   const m = {};
-  const add = (a, b, n, km) => {
+  const add = (a, b, n, km, nab, est) => {   // nab: flights from a to b among the n
     if (!a || !b) return;
+    if (a === b) nab = n;   // local flights: they leave and come back
     const k = routeKey(a, b);
-    const x = m[k] = m[k] || { key: k, a: k.split('-')[0], b: k.split('-')[1], n: 0, km: 0, flights: 0 };
+    const x = m[k] = m[k] || { key: k, a: k.split('-')[0], b: k.split('-')[1], n: 0, km: 0, flights: 0, ab: 0, ba: 0, unk: 0, est: false };
     x.n += n;
+    if (nab == null) x.unk += n;
+    else if (a === x.a) { x.ab += nab; x.ba += n - nab; } else { x.ba += nab; x.ab += n - nab; }
+    if (est) x.est = true;
     if (km && !x.km) x.km = km;
   };
-  if (withHistory) routes.forEach(r => add(r.from, r.to, r.count, r.distKm));
+  if (withHistory) routes.forEach(r => add(r.from, r.to, r.count, r.distKm, r.ab ?? null, r.abEst));
   list.forEach(f => {
-    add(f.from, f.to, 1, f.distKm || getDistance(f.from, f.to));
+    add(f.from, f.to, 1, f.distKm || getDistance(f.from, f.to), 1);
     const x = m[routeKey(f.from, f.to)];
     if (x) x.flights++;   // detailed flights on this route
   });
   return m;
 }
 const allLegs = () => Object.values(legMap(flights, true));
+// Direction of a pair of airports: 'ab' or 'ba' when every flight went the same way, '' otherwise
+const legDir = l => l.a === l.b || l.unk ? '' : !l.ba ? 'ab' : !l.ab ? 'ba' : '';
 // Totals of the whole logbook. Hours: the real duration when known, else distance ÷ 750 km/h (as in Arnaud's Excel).
 function logTotals() {
   const legs = allLegs();
@@ -565,7 +587,7 @@ async function switchCarnet(name) {
   try { history.replaceState(null, '', location.pathname + location.search + '#' + name); } catch (e) {}
   if (name === carnet) { updateCarnetUI(); return; }
   carnet = name;
-  flights = []; routes = []; airlinesList = []; historyUntil = ''; countryStatus = {}; dataSha = null;
+  flights = []; routes = []; airlinesList = []; airportAirlines = {}; historyUntil = ''; countryStatus = {}; dataSha = null;
   mapYear = ''; journalYear = ''; fittedFor = '';
   closeMapPanel();
   $('search-input').value = ''; $('filter-year').value = ''; $('filter-class').value = '';
@@ -587,6 +609,8 @@ function pickImport() { $('import-file').click(); }
 let charts = [];
 
 function showView(name) {
+  // A new tab starts at the top of the page, not at the scroll position of the previous tab
+  if (!$('view-' + name)?.classList.contains('active')) window.scrollTo(0, 0);
   document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.id === 'view-' + name));
   document.querySelectorAll('.nav-tab').forEach(t => t.classList.toggle('active', t.dataset.view === name));
   renderAll();
@@ -888,6 +912,7 @@ function openRouteOnMap(key) {
   mapYear = '';
   mapSelection = { type: 'route', key };
   showView('map');
+  focusRoute(key);
 }
 function openAirportOnMap(code) {
   mapYear = '';
@@ -1349,6 +1374,11 @@ async function openFlightDetail(flightId) {
 // ═══════════════════════════════════════
 //  MAP
 // ═══════════════════════════════════════
+// Initial bearing from one [lat, lon] point to another, in degrees clockwise from north
+function bearingDeg([la1, lo1], [la2, lo2]) {
+  const p1 = la1 * D2R, p2 = la2 * D2R, dl = (lo2 - lo1) * D2R;
+  return (Math.atan2(Math.sin(dl) * Math.cos(p2), Math.cos(p1) * Math.sin(p2) - Math.sin(p1) * Math.cos(p2) * Math.cos(dl)) * R2D + 360) % 360;
+}
 function greatCirclePoints(lat1, lon1, lat2, lon2, n = 80) {
   const p1lat = lat1 * D2R, p1lon = lon1 * D2R, p2lat = lat2 * D2R, p2lon = lon2 * D2R;
   const d = 2 * Math.asin(Math.sqrt(Math.sin((p2lat - p1lat) / 2) ** 2 + Math.cos(p1lat) * Math.cos(p2lat) * Math.sin((p2lon - p1lon) / 2) ** 2));
@@ -1372,7 +1402,7 @@ function greatCirclePoints(lat1, lon1, lat2, lon2, n = 80) {
 // The map is drawn by MapLibre (WebGL) from the country outlines shipped with
 // the site (world.js): no map provider, no key, smooth zoom, and a globe view.
 let mapgl = null, mapReady = false, mapReadyQueue = [];
-let routeKeys = new Set(), airportCodes = new Set();
+let routeKeys = new Set(), airportCodes = new Set(), arrowKeys = new Set();
 let fittedFor = '';            // airports the map was last framed on
 let mapSelection = null;       // { type: 'airport', code } or { type: 'route', key }
 let hoverPopup = null;
@@ -1427,6 +1457,7 @@ function initMap() {
         sources: {
           countries: { type: 'geojson', data: worldGeoJSON({}) },
           routes: { type: 'geojson', data: { type: 'FeatureCollection', features: [] }, promoteId: 'key' },
+          arrows: { type: 'geojson', data: { type: 'FeatureCollection', features: [] }, promoteId: 'key' },
           airports: { type: 'geojson', data: { type: 'FeatureCollection', features: [] }, promoteId: 'code' }
         },
         layers: [
@@ -1436,6 +1467,11 @@ function initMap() {
           { id: 'stopover-line', type: 'line', source: 'countries', filter: ['==', ['get', 'status'], 'stopover'], paint: { 'line-color': p.stopoverLine, 'line-width': 1, 'line-dasharray': [2, 2] } },
           { id: 'routes', type: 'line', source: 'routes', layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': p.route, 'line-width': ['interpolate', ['linear'], ['zoom'], 0.5, ['*', 0.55, ['min', 6, ['+', 1.5, ['*', 0.5, ['get', 'n']]]]], 3.5, ['min', 6, ['+', 1.5, ['*', 0.5, ['get', 'n']]]]], 'line-opacity': 0.8 } },
           { id: 'routes-hit', type: 'line', source: 'routes', paint: { 'line-color': '#000', 'line-width': 14, 'line-opacity': 0 } },
+          // An arrow in the middle of the routes flown in one direction only
+          { id: 'route-arrows', type: 'symbol', source: 'arrows',
+            layout: { 'icon-image': 'route-arrow', 'icon-rotate': ['get', 'bearing'], 'icon-rotation-alignment': 'map', 'icon-allow-overlap': true, 'icon-ignore-placement': true,
+              'icon-size': ['interpolate', ['linear'], ['zoom'], 0.5, 0.35, 3.5, 0.6, 7, 0.8] },
+            paint: { 'icon-color': p.route } },
           { id: 'airports', type: 'circle', source: 'airports', paint: { 'circle-color': p.marker, 'circle-stroke-color': p.markerLine, 'circle-stroke-width': ['interpolate', ['linear'], ['zoom'], 0.5, 1.5, 3.5, 2.5], 'circle-radius': ['interpolate', ['linear'], ['zoom'], 0.5, ['*', 0.5, ['min', 15, ['+', 5, ['*', 1.6, ['sqrt', ['get', 'n']]]]]], 3.5, ['min', 15, ['+', 5, ['*', 1.6, ['sqrt', ['get', 'n']]]]]] } }
         ]
       },
@@ -1457,6 +1493,16 @@ function initMap() {
     mapgl = null;
     return false;
   }
+  mapgl.on('styleimagemissing', e => {
+    if (e.id !== 'route-arrow' || mapgl.hasImage('route-arrow')) return;
+    // A white arrowhead pointing north; the layer colors it (SDF image)
+    const size = 32, c = document.createElement('canvas');
+    c.width = c.height = size;
+    const g = c.getContext('2d');
+    g.fillStyle = '#fff';
+    g.beginPath(); g.moveTo(16, 4); g.lineTo(28, 27); g.lineTo(16, 21); g.lineTo(4, 27); g.closePath(); g.fill();
+    mapgl.addImage('route-arrow', { width: size, height: size, data: new Uint8Array(g.getImageData(0, 0, size, size).data.buffer) }, { sdf: true });
+  });
   mapgl.touchZoomRotate.disableRotation();   // pinch zooms, without turning the map
   mapgl.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-left');
   mapgl.addControl(new maplibregl.GlobeControl(), 'top-left');
@@ -1481,7 +1527,7 @@ function initMap() {
     mapgl.on('mouseleave', layer, () => { mapgl.getCanvas().style.cursor = ''; hoverPopup.remove(); });
   };
   hover('airports', p => `<b>${esc(p.code)}</b> ${esc(city(p.code))}`);
-  hover('routes-hit', p => `${esc(p.a)} ↔ ${esc(p.b)} · ${plural(p.n, 'vol', 'vols')}`);
+  hover('routes-hit', p => `${p.dir === 'ba' ? `${esc(p.b)} → ${esc(p.a)}` : `${esc(p.a)} ${p.dir === 'ab' ? '→' : '↔'} ${esc(p.b)}`} · ${plural(p.n, 'vol', 'vols')}`);
 
   // One click handler: the airport wins over the route under it, empty sea or land closes the panel
   mapgl.on('click', e => {
@@ -1554,6 +1600,8 @@ function renderMap() {
     mapgl.setPaintProperty('airports', 'circle-stroke-opacity', ['case', ['boolean', ['feature-state', 'dim'], false], 0.3, 1]);
     mapgl.setPaintProperty('routes', 'line-color', ['case', ['boolean', ['feature-state', 'on'], false], p.routeOn, p.route]);
     mapgl.setPaintProperty('routes', 'line-opacity', ['case', ['boolean', ['feature-state', 'dim'], false], 0.12, ['boolean', ['feature-state', 'on'], false], 1, 0.8]);
+    mapgl.setPaintProperty('route-arrows', 'icon-color', ['case', ['boolean', ['feature-state', 'on'], false], p.routeOn, p.route]);
+    mapgl.setPaintProperty('route-arrows', 'icon-opacity', ['case', ['boolean', ['feature-state', 'dim'], false], 0.15, 1]);
 
     // Countries with the passport rules
     const info = countryInfo(), status = {};
@@ -1569,8 +1617,19 @@ function renderMap() {
       type: 'FeatureCollection',
       features: lines.map(r => {
         const A = AIRPORTS[r.a], B = AIRPORTS[r.b];
-        return { type: 'Feature', properties: { key: r.key, a: r.a, b: r.b, n: r.n },
+        return { type: 'Feature', properties: { key: r.key, a: r.a, b: r.b, n: r.n, dir: legDir(r) },
           geometry: { type: 'LineString', coordinates: greatCirclePoints(A.lat, A.lon, B.lat, B.lon, 64).map(([la, lo]) => [lo, la]) } };
+      })
+    });
+    const oneWay = lines.filter(l => legDir(l));
+    arrowKeys = new Set(oneWay.map(l => l.key));
+    mapgl.getSource('arrows').setData({
+      type: 'FeatureCollection',
+      features: oneWay.map(l => {
+        const [A, B] = legDir(l) === 'ab' ? [AIRPORTS[l.a], AIRPORTS[l.b]] : [AIRPORTS[l.b], AIRPORTS[l.a]];
+        const pts = greatCirclePoints(A.lat, A.lon, B.lat, B.lon, 64);
+        return { type: 'Feature', properties: { key: l.key, bearing: bearingDeg(pts[31], pts[33]) },
+          geometry: { type: 'Point', coordinates: [pts[32][1], pts[32][0]] } };
       })
     });
 
@@ -1629,6 +1688,29 @@ function focusAirport(code) {
   if (!wide) $('map-container').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
+// Frames one route, with room for the side panel (or the bottom sheet on a phone)
+function focusRoute(key) {
+  const [a, b] = key.split('-').map(c => AIRPORTS[c]);
+  if (!a || !b || !mapgl) return;
+  whenMapReady(() => {
+    const wide = window.innerWidth > 768;
+    let pad;
+    if (wide) pad = { top: 60, left: 60, bottom: 60, right: $('map-panel').offsetWidth + 60 };
+    else {
+      // The map is brought under the header; the bottom sheet covers its lower part
+      const mapTop = document.querySelector('header').offsetHeight + 8;
+      const covered = mapTop + $('map').offsetHeight - (window.innerHeight - $('map-panel').offsetHeight);
+      pad = { top: 40, left: 30, right: 30, bottom: Math.max(30, covered + 30) };
+    }
+    if (a === b) { mapgl.easeTo({ center: [a.lon, a.lat], zoom: 7, offset: [(pad.left - pad.right) / 2, (pad.top - pad.bottom) / 2], duration: 900 }); return; }
+    // A route across the 180° meridian is framed the short way round
+    let lonB = b.lon;
+    if (lonB - a.lon > 180) lonB -= 360; else if (a.lon - lonB > 180) lonB += 360;
+    mapgl.fitBounds([[Math.min(a.lon, lonB), Math.min(a.lat, b.lat)], [Math.max(a.lon, lonB), Math.max(a.lat, b.lat)]],
+      { padding: pad, maxZoom: 7, duration: 900 });
+  });
+}
+
 // Dims everything not linked to the selected airport or route
 function applyHighlight() {
   if (!mapgl || !mapReady) return;
@@ -1641,6 +1723,7 @@ function applyHighlight() {
   routeKeys.forEach(k => {
     const on = !!sel && (sel.type === 'airport' ? k.split('-').includes(sel.code) : k === sel.key);
     mapgl.setFeatureState({ source: 'routes', id: k }, { on, dim: !!sel && !on });
+    if (arrowKeys.has(k)) mapgl.setFeatureState({ source: 'arrows', id: k }, { on, dim: !!sel && !on });
   });
   airportCodes.forEach(code => {
     const on = !sel || linked.has(code);
@@ -1728,7 +1811,18 @@ function showAirportPanelHistory(code, ap, list) {
   const legs = Object.values(legMap(mapYear ? mapFlights() : flights, !mapYear)).filter(l => l.a === code || l.b === code);
   const passages = legs.reduce((s, l) => s + l.n, 0);
   const hist = legs.reduce((s, l) => s + (l.n - l.flights), 0);
-  const links = legs.map(l => ({ o: l.a === code ? l.b : l.a, n: l.n, key: l.key, loop: l.a === l.b })).sort((a, b) => b.n - a.n);
+  const links = legs.map(l => {
+    const here = l.a === code, loop = l.a === l.b;
+    return { o: here ? l.b : l.a, n: l.n, key: l.key, loop, unk: l.unk,
+      out: loop ? l.n : here ? l.ab : l.ba, inn: loop ? l.n : here ? l.ba : l.ab };
+  }).sort((a, b) => b.n - a.n);
+  const known = links.every(x => !x.unk);
+  const deps = links.reduce((s, x) => s + x.out, 0), arrs = links.reduce((s, x) => s + x.inn, 0);
+  // Airlines: the Excel list for this airport, plus the detailed flights (with their count)
+  const alCount = {};
+  list.forEach(f => { if (f.airline) alCount[f.airline] = (alCount[f.airline] || 0) + 1; });
+  const als = [...new Set([...(airportAirlines[code] || []), ...Object.keys(alCount)])];
+  const arrow = x => x.loop || !x.out === !x.inn ? '' : x.out ? '→ ' : '← ';
   openMapPanel(`
     <div class="mp-photo" data-airport-photo="${esc(code)}"></div>
     <div class="mp-head">
@@ -1740,14 +1834,18 @@ function showAirportPanelHistory(code, ap, list) {
     </div>
     <div class="mp-stats">
       <div><b>${fmtInt(passages)}</b><span>${passages > 1 ? 'passages' : 'passage'}</span></div>
-      <div><b>${links.length}</b><span>${links.length > 1 ? 'liaisons' : 'liaison'}</span></div>
-      <div><b>${list.length}</b><span>${list.length > 1 ? 'vols saisis' : 'vol saisi'}</span></div>
+      ${known ? `<div><b>${fmtInt(deps)}</b><span>${deps > 1 ? 'décollages' : 'décollage'}</span></div>
+      <div><b>${fmtInt(arrs)}</b><span>${arrs > 1 ? 'atterrissages' : 'atterrissage'}</span></div>`
+      : `<div><b>${links.length}</b><span>${links.length > 1 ? 'liaisons' : 'liaison'}</span></div>
+      <div><b>${list.length}</b><span>${list.length > 1 ? 'vols saisis' : 'vol saisi'}</span></div>`}
     </div>
     ${hist ? `<div class="mp-note">Dont ${plural(hist, 'vol', 'vols')} de l'historique, sans date${historyUntil ? ` (jusqu'au ${formatDate(historyUntil)})` : ''}.</div>` : ''}
-    <div class="mp-label">Liaisons</div>
+    <div class="mp-label">${plural(links.length, 'liaison', 'liaisons')}${links.some(x => arrow(x)) ? ' · → départ seulement, ← arrivée seulement' : ''}</div>
     <div class="mp-chips">${links.map(x => x.loop
       ? `<span class="mp-chip"><b>${esc(code)}</b> vols locaux <span>×${x.n}</span></span>`
-      : `<button type="button" class="mp-chip" data-route="${esc(x.key)}"><b>${esc(x.o)}</b> ${esc(city(x.o))} <span>×${x.n}</span></button>`).join('')}</div>
+      : `<button type="button" class="mp-chip" data-route="${esc(x.key)}"><b>${arrow(x)}${esc(x.o)}</b> ${esc(city(x.o))} <span>×${x.n}</span></button>`).join('')}</div>
+    ${als.length ? `<div class="mp-label">${plural(als.length, 'compagnie', 'compagnies')}</div>
+    <div class="mp-chips">${als.map(a => `<span class="mp-chip mp-chip-static">${esc(a)}${alCount[a] ? ` <span>×${alCount[a]}</span>` : ''}</span>`).join('')}</div>` : ''}
     ${list.length ? `<div class="mp-label">Vols saisis</div>${flightRows(list, code)}` : ''}`, { type: 'airport', code });
   loadAirportPhoto(code);
 }
@@ -1816,11 +1914,16 @@ function showRoutePanel(key) {
   const total = list.length + hist;
   if (hasHistory()) {
     const km = routes.find(r => routeKey(r.from, r.to) === key)?.distKm || getDistance(a, b) || 0;
+    const leg = legMap(mapYear ? mapFlights() : flights, !mapYear)[key];
+    const dir = leg ? legDir(leg) : '';
+    const [x, y] = dir === 'ba' ? [b, a] : [a, b], sign = dir ? '→' : '↔';
+    const split = !leg || dir || leg.unk || a === b ? ''
+      : `<div class="mp-note">Par sens : ${esc(a)} → ${esc(b)} ${leg.ab} · ${esc(b)} → ${esc(a)} ${leg.ba}${leg.est ? ' (répartition estimée)' : ''}.</div>`;
     openMapPanel(`
-      <div class="mp-head"><div class="mp-code mp-code-route">${esc(a)}<span>↔</span>${esc(b)}</div></div>
+      <div class="mp-head"><div class="mp-code mp-code-route">${esc(x)}<span>${sign}</span>${esc(y)}</div></div>
       <div class="mp-sub" style="margin:-4px 0 12px">
-        <button type="button" class="mp-link" data-airport="${esc(a)}">${esc(city(a))}</button> ↔
-        <button type="button" class="mp-link" data-airport="${esc(b)}">${esc(city(b))}</button>
+        <button type="button" class="mp-link" data-airport="${esc(x)}">${esc(city(x))}</button> ${sign}
+        <button type="button" class="mp-link" data-airport="${esc(y)}">${esc(city(y))}</button>
       </div>
       <div class="mp-stats">
         <div><b>${total}</b><span>${total > 1 ? 'vols' : 'vol'}</span></div>
@@ -1828,6 +1931,7 @@ function showRoutePanel(key) {
         <div><b>${fmtInt(km * total)}</b><span>km en tout</span></div>
       </div>
       <div class="mp-note">${hist ? `${plural(hist, 'vol', 'vols')} dans l'historique, sans date. ` : ''}Durée estimée : ${avg ? fmtDur(avg) : fmtDur(Math.round(km / 750 * 60))}${avg ? ' (moyenne des vols saisis)' : ' (distance ÷ 750 km/h)'}.</div>
+      ${dir && a !== b ? `<div class="mp-note">${leg.n > 1 ? 'Toujours' : 'Vol'} dans le sens ${esc(x)} → ${esc(y)}.</div>` : split}
       ${airlines.length ? `<div class="mp-note">${esc(airlines.join(', '))}</div>` : ''}
       ${list.length ? `<div class="mp-label">Vols saisis</div>${flightRows(list)}` : ''}`, { type: 'route', key });
     return;
@@ -2115,9 +2219,13 @@ function renderAnalyticsHistory(container) {
   const topAirports = top(passages).filter(([c]) => AIRPORTS[c]);
   const topRoutes = [...legs].sort((a, b) => b.n - a.n || b.km - a.km);
   const topCountries = top(byCountry);
-  const counted = {};
-  flights.forEach(f => { if (f.airline) counted[f.airline] = (counted[f.airline] || 0) + 1; });
-  const airlines = [...new Set([...airlinesList, ...Object.keys(counted)])].sort((a, b) => a.localeCompare(b, 'fr'));
+  // Airlines: in how many airports each one was taken or left (the Excel per airport, plus the detailed flights)
+  const alAirports = {};
+  const addAl = (name, code) => { (alAirports[name] = alAirports[name] || new Set()).add(code); };
+  Object.entries(airportAirlines).forEach(([c, list]) => list.forEach(a => addAl(a, c)));
+  flights.forEach(f => { if (f.airline) { addAl(f.airline, f.from); addAl(f.airline, f.to); } });
+  airlinesList.forEach(a => { alAirports[a] = alAirports[a] || new Set(); });
+  const topAirlines = Object.entries(alAirports).map(([a, set]) => [a, set.size]).sort((x, y) => y[1] - x[1] || x[0].localeCompare(y[0], 'fr'));
   const rankCard = (id, title, sub) => `<section class="st-card"><div class="st-card-head"><h2>${title}</h2><span>${sub}</span></div><ol class="top-list" id="${id}"></ol></section>`;
 
   container.innerHTML = `
@@ -2153,10 +2261,7 @@ function renderAnalyticsHistory(container) {
       ${rankCard('top-airports', 'Aéroports', 'passages')}
       ${rankCard('top-routes', 'Trajets', 'vols, aller et retour')}
       ${rankCard('top-countries', 'Pays', 'passages dans les aéroports')}
-      <section class="st-card"><div class="st-card-head"><h2>Compagnies</h2><span>${airlines.length} différentes</span></div>
-        <div class="mp-chips" style="margin-top:4px">${airlines.map(a => `<span class="mp-chip">${esc(a)}${counted[a] ? ` <span>×${counted[a]}</span>` : ''}</span>`).join('')}</div>
-        <p class="muted" style="font-size:12px;margin-top:10px">L'historique ne dit pas quelle compagnie a fait quel vol : pas de classement.</p>
-      </section>
+      ${rankCard('top-airlines', 'Compagnies', `${topAirlines.length} différentes · aéroports`)}
     </div>
     <p class="muted" style="font-size:12px;margin-top:16px">Les années, les mois, les sièges et les avions demandent des vols datés. Ils apparaîtront avec les vols saisis en détail.</p>`;
 
@@ -2171,7 +2276,11 @@ function renderAnalyticsHistory(container) {
   $('top-countries').innerHTML = topCountries.map(([cc, n], i) => `<li>
       <span class="rank">${i + 1}</span><span class="rk-name rk-main">${countryFlag(cc)} ${esc(countryName(cc))}</span>
       ${bar(n, topCountries[0][1], 'var(--green)')}<span class="count">${n}</span></li>`).join('');
-  ['top-airports', 'top-routes', 'top-countries'].forEach(id => addShowMore(id, 8));
+  $('top-airlines').innerHTML = topAirlines.map(([a, n], i) => `<li>
+      <span class="rank">${i + 1}</span><span class="rk-name rk-main">${esc(a)}</span>
+      ${bar(n, topAirlines[0][1] || 1, 'var(--accent2)')}<span class="count">${n}</span></li>`).join('');
+  $('top-airlines').insertAdjacentHTML('afterend', `<p class="muted" style="font-size:12px;margin-top:10px">Nombre d'aéroports où vous avez pris ou quitté chaque compagnie. L'historique ne dit pas quelle compagnie a fait quel vol.</p>`);
+  ['top-airports', 'top-routes', 'top-countries', 'top-airlines'].forEach(id => addShowMore(id, 8));
 }
 
 // Shows the first items of a list and a button for the rest. The choice is kept while the page is open.

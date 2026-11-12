@@ -11,7 +11,9 @@ Deux carnets dans le meme depot de donnees, avec la meme cle :
 - `flights.json` : carnet de Liv
 - `arnaud.json` : carnet d'Arnaud. En plus des vols detailles, il contient
   l'historique importe de son fichier Excel (`routes` : trajets avec un nombre
-  de vols, sans dates, jusqu'a `historyUntil`).
+  de vols, sans dates, jusqu'a `historyUntil`). Pour chaque trajet, `ab` donne
+  le nombre de vols dans le sens `from` vers `to` (`abEst` : repartition estimee).
+  `airportAirlines` donne les compagnies prises dans chaque aeroport.
 
 Le bouton Liv / Arnaud en haut de la page change de carnet. Chaque appareil
 retient le dernier carnet ouvert. Les adresses `#liv` et `#arnaud` ouvrent
