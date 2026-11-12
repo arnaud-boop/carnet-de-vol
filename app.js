@@ -1,7 +1,8 @@
 'use strict';
 // SkyLog · Carnet de vol
 // The page holds no flight data. Flights live in a private GitHub repository:
-//   flights.json          the flights and the airports they use
+//   flights.json          Liv's logbook: the flights and the airports they use
+//   arnaud.json           Arnaud's logbook: same format, plus his history as routes
 //   photos/<name>.jpg     one image file per flight photo
 // Each save is one commit, so GitHub keeps the full history.
 
@@ -9,15 +10,28 @@
 //  STATE
 // ═══════════════════════════════════════
 const CFG_KEY = 'carnet_config';     // { owner, repo, branch, token } for this device
-const CACHE_KEY = 'carnet_cache';    // last copy of the data, shown first and when offline
+const CARNET_KEY = 'carnet_current'; // logbook last opened on this device
 const GH_API = 'https://api.github.com';
-const DATA_FILE = 'flights.json';
+
+// Two logbooks in the same repository. "inOther" is how this person is named
+// in the companions of the other logbook (used when a flight is copied there).
+const CARNETS = {
+  liv: { label: 'Liv', of: 'de Liv', file: 'flights.json', cache: 'carnet_cache', inOther: 'Liv' },
+  arnaud: { label: 'Arnaud', of: 'd\'Arnaud', file: 'arnaud.json', cache: 'carnet_cache_arnaud', inOther: 'Papa' }
+};
+let carnet = 'liv';
+const dataFile = () => CARNETS[carnet].file;
+const otherCarnet = () => (carnet === 'liv' ? 'arnaud' : 'liv');
 
 let cfg = null;
 let flights = [];
+let routes = [];                      // history without dates: { from, to, count, distKm } (Arnaud)
+let airlinesList = [];                // airlines of the history, without counts
+let historyUntil = '';                // last day covered by the history (YYYY-MM-DD)
 let countryStatus = {};               // passport: country code -> 'visited' | 'stopover' | 'land'
-let dataSha = null;                  // version of flights.json this device last saw
+let dataSha = null;                  // version of the data file this device last saw
 let saving = false;
+const hasHistory = () => routes.length > 0;
 
 const $ = id => document.getElementById(id);
 
@@ -184,10 +198,11 @@ function normalizeFlight(f) {
   };
 }
 
+// Codes are IATA (3 letters). A field without one keeps its ICAO code (4 letters, e.g. LFPX).
 function addAirports(map) {
   if (!map || typeof map !== 'object') return;
   for (const [code, a] of Object.entries(map)) {
-    if (!/^[A-Z0-9]{3}$/.test(code) || !a || !Number.isFinite(a.lat) || !Number.isFinite(a.lon)) continue;
+    if (!/^[A-Z0-9]{3,4}$/.test(code) || !a || !Number.isFinite(a.lat) || !Number.isFinite(a.lon)) continue;
     AIRPORTS[code] = {
       name: String(a.name || code), city: String(a.city || a.name || code), country: String(a.country || ''),
       lat: a.lat, lon: a.lon, tz: a.tz || AIRPORTS[code]?.tz || null
@@ -200,8 +215,15 @@ function applyDoc(doc) {
   if (!Array.isArray(list)) throw new StoreError('Le fichier de données a un format inattendu.', -1);
   addAirports(doc.airports);
   flights = list.map(normalizeFlight).filter(Boolean);
+  const obj = Array.isArray(doc) ? {} : doc;
+  routes = (Array.isArray(obj.routes) ? obj.routes : []).map(r => ({
+    from: String(r?.from || '').toUpperCase(), to: String(r?.to || '').toUpperCase(),
+    count: Math.max(0, Math.round(+r?.count || 0)), distKm: Math.max(0, Math.round(+r?.distKm || 0))
+  })).filter(r => /^[A-Z0-9]{3,4}$/.test(r.from) && /^[A-Z0-9]{3,4}$/.test(r.to) && r.count > 0);
+  airlinesList = (Array.isArray(obj.airlines) ? obj.airlines : []).map(s => String(s || '').trim()).filter(Boolean);
+  historyUntil = /^\d{4}-\d{2}-\d{2}$/.test(obj.historyUntil || '') ? obj.historyUntil : '';
   countryStatus = {};
-  const cs = !Array.isArray(doc) && doc.countryStatus;
+  const cs = obj.countryStatus;
   if (cs && typeof cs === 'object') {
     for (const [cc, st] of Object.entries(cs)) if (/^[A-Z]{2}$/.test(cc) && ['visited', 'stopover', 'land'].includes(st)) countryStatus[cc] = st;
   }
@@ -209,18 +231,54 @@ function applyDoc(doc) {
 
 // The file content: flights sorted by date, plus every airport they use.
 // Airports are saved with the flights so the map, the countries and the
-// durations never depend on a download.
+// durations never depend on a download. The history (routes) is kept as it is.
 function buildDoc() {
   const sorted = [...flights].sort((a, b) => (a.date + a.departureTime).localeCompare(b.date + b.departureTime));
   const airports = {};
-  [...new Set(sorted.flatMap(f => [f.from, f.to]).filter(Boolean))].sort().forEach(c => {
+  [...new Set([...sorted, ...routes].flatMap(f => [f.from, f.to]).filter(Boolean))].sort().forEach(c => {
     const a = AIRPORTS[c];
     if (a) airports[c] = { name: a.name, city: a.city, country: a.country, lat: a.lat, lon: a.lon, tz: a.tz || null };
   });
   const doc = { schema: 1, airports, flights: sorted };
+  if (routes.length) {
+    doc.routes = routes;
+    if (airlinesList.length) doc.airlines = airlinesList;
+    if (historyUntil) doc.historyUntil = historyUntil;
+  }
   const cs = Object.keys(countryStatus).sort();
   if (cs.length) doc.countryStatus = Object.fromEntries(cs.map(cc => [cc, countryStatus[cc]]));
   return doc;
+}
+
+// Every pair of airports flown, both directions together: { key: { a, b, n, km } }.
+// km is the distance of one flight. The history counts when withHistory is true.
+function legMap(list, withHistory) {
+  const m = {};
+  const add = (a, b, n, km) => {
+    if (!a || !b) return;
+    const k = routeKey(a, b);
+    const x = m[k] = m[k] || { key: k, a: k.split('-')[0], b: k.split('-')[1], n: 0, km: 0, flights: 0 };
+    x.n += n;
+    if (km && !x.km) x.km = km;
+  };
+  if (withHistory) routes.forEach(r => add(r.from, r.to, r.count, r.distKm));
+  list.forEach(f => {
+    add(f.from, f.to, 1, f.distKm || getDistance(f.from, f.to));
+    const x = m[routeKey(f.from, f.to)];
+    if (x) x.flights++;   // detailed flights on this route
+  });
+  return m;
+}
+const allLegs = () => Object.values(legMap(flights, true));
+// Totals of the whole logbook. Hours: the real duration when known, else distance ÷ 750 km/h (as in Arnaud's Excel).
+function logTotals() {
+  const legs = allLegs();
+  const n = legs.reduce((s, l) => s + l.n, 0);
+  const km = routes.reduce((s, r) => s + r.count * r.distKm, 0) + flights.reduce((s, f) => s + (f.distKm || 0), 0);
+  const estMin = routes.reduce((s, r) => s + r.count * r.distKm / 750 * 60, 0)
+    + flights.reduce((s, f) => s + (f.durationMin || (f.distKm || 0) / 750 * 60 * (hasHistory() ? 1 : 0)), 0);
+  const co2 = routes.reduce((s, r) => s + r.count * calcCO2(r.distKm, 'economy'), 0) + flights.reduce((s, f) => s + co2Of(f), 0);
+  return { legs, n, km, mins: estMin, co2 };
 }
 
 // ═══════════════════════════════════════
@@ -265,25 +323,31 @@ function queue(fn) {
   return p;
 }
 
-async function loadRemote() {
+// Reads one data file. Returns { doc, sha }, or { doc: null, sha: null } when the file does not exist yet.
+async function readDataFile(file) {
   let r;
-  try { r = await ghFetch(ghUrl(DATA_FILE) + refQuery()); }
+  try { r = await ghFetch(ghUrl(file) + refQuery()); }
   catch (e) {
     if (e.status !== 404) throw e;
-    // No data file yet: check that the repository itself answers, then start empty
+    // No data file yet: check that the repository itself answers
     await ghFetch(`${GH_API}/repos/${encodeURIComponent(cfg.owner)}/${encodeURIComponent(cfg.repo)}`);
-    flights = []; dataSha = null; writeCache();
-    return;
+    return { doc: null, sha: null };
   }
   const j = await r.json();
   const text = (j.content && j.encoding === 'base64')
     ? b64ToUtf8(j.content)
-    : await (await ghFetch(ghUrl(DATA_FILE) + refQuery(), {}, true)).text();   // files over 1 MB
-  let doc;
-  try { doc = JSON.parse(text); }
+    : await (await ghFetch(ghUrl(file) + refQuery(), {}, true)).text();   // files over 1 MB
+  try { return { doc: JSON.parse(text), sha: j.sha }; }
   catch (e) { throw new StoreError('Le fichier de données est illisible.', -1); }
-  applyDoc(doc);
-  dataSha = j.sha;
+}
+
+async function loadRemote() {
+  const which = carnet;
+  const { doc, sha } = await readDataFile(CARNETS[which].file);
+  if (which !== carnet) return;   // the other logbook was opened meanwhile
+  if (doc) applyDoc(doc);
+  else applyDoc({ flights: [] });
+  dataSha = sha;
   writeCache();
 }
 
@@ -295,15 +359,42 @@ async function putFile(path, b64, message, sha) {
 }
 
 function persist(message) {
+  const which = carnet, body = utf8ToB64(JSON.stringify(buildDoc(), null, 2) + '\n');
   return queue(async () => {
-    dataSha = await putFile(DATA_FILE, utf8ToB64(JSON.stringify(buildDoc(), null, 2) + '\n'), message, dataSha);
+    if (which !== carnet) throw new StoreError('Le carnet a changé pendant l\'enregistrement.', -1);
+    dataSha = await putFile(CARNETS[which].file, body, `${CARNETS[which].label} : ${message}`, dataSha);
     writeCache();
+  });
+}
+
+// Adds a copy of a flight to the other logbook (a flight taken together).
+// The seat and the photo stay in this logbook only; companions are swapped.
+function copyToOtherCarnet(f) {
+  const to = otherCarnet(), from = carnet;
+  const people = (f.coTravelers || '').split(',').map(p => p.trim()).filter(p => p && norm(p) !== norm(CARNETS[to].inOther));
+  if (!people.some(p => norm(p) === norm(CARNETS[from].inOther))) people.unshift(CARNETS[from].inOther);
+  const copy = { ...f, id: uid(), seat: '', photo: null, coTravelers: people.join(', ') };
+  return queue(async () => {
+    const { doc, sha } = await readDataFile(CARNETS[to].file);
+    const d = doc && !Array.isArray(doc) ? doc : { schema: 1, airports: {}, flights: Array.isArray(doc) ? doc : [] };
+    d.flights = Array.isArray(d.flights) ? d.flights : [];
+    if (d.flights.some(x => x.date === f.date && x.from === f.from && x.to === f.to)) return 'exists';
+    d.flights.push(copy);
+    d.flights.sort((a, b) => ((a.date || '') + (a.departureTime || '')).localeCompare((b.date || '') + (b.departureTime || '')));
+    d.airports = d.airports && typeof d.airports === 'object' ? d.airports : {};
+    [f.from, f.to].forEach(c => {
+      const a = AIRPORTS[c];
+      if (a && !d.airports[c]) d.airports[c] = { name: a.name, city: a.city, country: a.country, lat: a.lat, lon: a.lon, tz: a.tz || null };
+    });
+    await putFile(CARNETS[to].file, utf8ToB64(JSON.stringify(d, null, 2) + '\n'), `${CARNETS[to].label} : ajout du vol ${f.from}-${f.to} du ${formatDate(f.date)} (copié du carnet ${CARNETS[from].of})`, sha);
+    try { localStorage.removeItem(CARNETS[to].cache); } catch (e) {}
+    return 'added';
   });
 }
 
 // Applies a change in memory, then saves it. If the save fails the change is undone.
 async function commitChange(mutate, message) {
-  const before = flights.slice(), beforeCountries = { ...countryStatus };
+  const before = flights.slice(), beforeCountries = { ...countryStatus }, which = carnet;
   mutate();
   setStatus('busy', 'Enregistrement…');
   try {
@@ -311,6 +402,7 @@ async function commitChange(mutate, message) {
     setStatus('ok');
     return true;
   } catch (e) {
+    if (which !== carnet) { showToast('Non enregistré : le carnet a changé pendant l\'enregistrement.', true); return false; }
     flights = before; countryStatus = beforeCountries;
     if (e.status === 409 || e.status === 422) {
       await reloadData(true);
@@ -352,10 +444,10 @@ function deletePhoto(path, message) {
 
 // ─── Local copy and device settings ───
 function writeCache() {
-  try { localStorage.setItem(CACHE_KEY, JSON.stringify({ doc: buildDoc(), sha: dataSha, at: Date.now() })); } catch (e) {}
+  try { localStorage.setItem(CARNETS[carnet].cache, JSON.stringify({ doc: buildDoc(), sha: dataSha, at: Date.now() })); } catch (e) {}
 }
 function readCache() {
-  try { return JSON.parse(localStorage.getItem(CACHE_KEY) || 'null'); } catch (e) { return null; }
+  try { return JSON.parse(localStorage.getItem(CARNETS[carnet].cache) || 'null'); } catch (e) { return null; }
 }
 function readCfg() {
   try {
@@ -396,7 +488,7 @@ async function reloadData(silent) {
 
 // ─── First use on a device ───
 function showSetup(message) {
-  $('app').hidden = true; $('header-actions').hidden = true; $('banner').hidden = true; $('nav').hidden = true;
+  $('app').hidden = true; $('header-actions').hidden = true; $('banner').hidden = true; $('nav').hidden = true; $('who').hidden = true;
   $('setup').hidden = false;
   $('setup-error').textContent = message || '';
   if (!$('cfg-repo').value) {
@@ -405,7 +497,7 @@ function showSetup(message) {
   }
 }
 function showApp() {
-  $('setup').hidden = true; $('app').hidden = false; $('header-actions').hidden = false; $('nav').hidden = false;
+  $('setup').hidden = true; $('app').hidden = false; $('header-actions').hidden = false; $('nav').hidden = false; $('who').hidden = false;
 }
 
 async function connect(e) {
@@ -423,7 +515,8 @@ async function connect(e) {
     localStorage.setItem(CFG_KEY, JSON.stringify(cfg));
     $('cfg-token').value = '';
     showApp(); setStatus('ok'); renderAll();
-    showToast(`Appareil connecté. ${flights.length} vol${flights.length > 1 ? 's' : ''} chargé${flights.length > 1 ? 's' : ''}.`);
+    showToast('Appareil connecté.');
+    if (!storedCarnet()) openWhoModal();
   } catch (err) {
     cfg = null;
     $('setup-error').textContent = err.message || 'Connexion impossible.';
@@ -434,11 +527,53 @@ async function connect(e) {
 
 function disconnect() {
   if (!confirm('Supprimer la clé d\'accès et la copie locale de cet appareil ?\n\nLes vols restent enregistrés sur GitHub.')) return;
-  try { localStorage.removeItem(CFG_KEY); localStorage.removeItem(CACHE_KEY); } catch (e) {}
-  cfg = null; flights = []; dataSha = null;
+  try {
+    localStorage.removeItem(CFG_KEY); localStorage.removeItem(CARNET_KEY);
+    Object.values(CARNETS).forEach(c => localStorage.removeItem(c.cache));
+  } catch (e) {}
+  cfg = null; flights = []; routes = []; dataSha = null;
   photoCache.forEach(u => { if (u.startsWith('blob:')) URL.revokeObjectURL(u); });
   photoCache.clear();
   showSetup();
+}
+
+// ─── Which logbook: Liv or Arnaud. Each device remembers the last one; #liv or #arnaud in the address wins. ───
+function storedCarnet() {
+  try { const v = localStorage.getItem(CARNET_KEY); return CARNETS[v] ? v : null; } catch (e) { return null; }
+}
+function hashCarnet() {
+  const h = location.hash.slice(1).toLowerCase();
+  return CARNETS[h] ? h : null;
+}
+function updateCarnetUI() {
+  document.querySelectorAll('[data-carnet]').forEach(b => {
+    const on = b.dataset.carnet === carnet;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-pressed', String(on));
+  });
+  const tab = document.querySelector('.nav-tab[data-view="flights"]');
+  tab.querySelector('.lg').textContent = hasHistory() ? 'Trajets' : 'Mes vols';
+  tab.querySelector('.sh').textContent = hasHistory() ? 'Trajets' : 'Vols';
+  document.title = `Carnet de vol · ${CARNETS[carnet].label}`;
+}
+function openWhoModal() { $('who-modal').classList.add('open'); }
+
+async function switchCarnet(name) {
+  if (!CARNETS[name]) return;
+  closeModal('who-modal');
+  try { localStorage.setItem(CARNET_KEY, name); } catch (e) {}
+  try { history.replaceState(null, '', location.pathname + location.search + '#' + name); } catch (e) {}
+  if (name === carnet) { updateCarnetUI(); return; }
+  carnet = name;
+  flights = []; routes = []; airlinesList = []; historyUntil = ''; countryStatus = {}; dataSha = null;
+  mapYear = ''; journalYear = ''; fittedFor = '';
+  closeMapPanel();
+  $('search-input').value = ''; $('filter-year').value = ''; $('filter-class').value = '';
+  const cached = readCache();
+  if (cached?.doc) { try { applyDoc(cached.doc); dataSha = cached.sha || null; } catch (e) {} }
+  renderAll();
+  window.scrollTo(0, 0);
+  await reloadData(true);
 }
 
 // ─── Menu ───
@@ -457,6 +592,7 @@ function showView(name) {
   renderAll();
 }
 function renderAll() {
+  updateCarnetUI();
   if ($('app').hidden) return;
   const active = document.querySelector('.view.active')?.id;
   if (active === 'view-passport') renderPassport();
@@ -478,15 +614,18 @@ const STATUS_LABEL = { visited: 'visité en avion', land: 'visité sans avion', 
 
 function countryInfo() {
   const trips = buildTrips();
-  const auto = {};   // cc -> { visited: bool, first, trips:Set }
-  const touch = (cc, date, tripIdx, isStay) => {
+  const auto = {};   // cc -> { stay: bool, first, trips:Set, n }
+  const touch = (cc, date, tripIdx, isStay, n = 1) => {
     if (!cc) return;
-    const c = auto[cc] = auto[cc] || { stay: false, first: date, trips: new Set() };
+    const c = auto[cc] = auto[cc] || { stay: false, first: date, trips: new Set(), n: 0 };
     if (date < c.first) c.first = date;
-    if (isStay) { c.stay = true; c.trips.add(tripIdx); }
+    c.n += n;
+    if (isStay) { c.stay = true; if (tripIdx >= 0) c.trips.add(tripIdx); }
   };
   const home = homeAirport();
-  if (home && AIRPORTS[home]) touch(AIRPORTS[home].country, flights.reduce((m, f) => f.date < m ? f.date : m, '9999'), -1, true);
+  if (home && AIRPORTS[home]) touch(AIRPORTS[home].country, hasHistory() ? '' : flights.reduce((m, f) => f.date < m ? f.date : m, '9999'), -1, true, 0);
+  // The history has no dates: every country it reaches counts as visited ('' = before the detailed flights)
+  routes.forEach(r => [r.from, r.to].forEach(c => touch(AIRPORTS[c]?.country, '', -1, true, r.count)));
   trips.forEach((t, ti) => t.flights.forEach((f, i) => {
     const next = t.flights[i + 1];
     const transit = next && next.from === f.to && next.date === arrivalDay(f);
@@ -497,21 +636,33 @@ function countryInfo() {
   for (const [cc, c] of Object.entries(auto)) {
     const autoStatus = c.stay ? 'visited' : 'stopover';
     const status = countryStatus[cc] === 'stopover' || countryStatus[cc] === 'visited' ? countryStatus[cc] : autoStatus;
-    const row = { cc, first: c.first, trips: c.trips.size, status, auto: autoStatus, overridden: status !== autoStatus };
+    const row = { cc, first: c.first, trips: c.trips.size, n: c.n, status, auto: autoStatus, overridden: status !== autoStatus };
     (status === 'stopover' ? stopover : visited).push(row);
   }
   for (const [cc, st] of Object.entries(countryStatus)) {
-    if (st === 'land' && !auto[cc]) visited.push({ cc, first: '', trips: 0, status: 'land', auto: null, overridden: true });
+    if (st === 'land' && !auto[cc]) visited.push({ cc, first: '', trips: 0, n: 0, status: 'land', auto: null, overridden: true });
   }
-  visited.sort((a, b) => (a.first || '9999').localeCompare(b.first || '9999') || a.cc.localeCompare(b.cc));
-  stopover.sort((a, b) => a.first.localeCompare(b.first));
+  // Order: history (most flights first), then by first visit; countries without flights last
+  const sortKey = r => r.status === 'land' ? 'z' : r.first ? 'b' + r.first : 'a';
+  const order = (a, b) => sortKey(a).localeCompare(sortKey(b)) || (b.n - a.n) || a.cc.localeCompare(b.cc);
+  visited.sort(order);
+  stopover.sort(order);
   return { visited, stopover, trips };
 }
 
 function homeAirport() {
   const counts = {};
-  flights.forEach(f => [f.from, f.to].forEach(c => { counts[c] = (counts[c] || 0) + 1; }));
+  allLegs().forEach(l => [l.a, l.b].forEach(c => { counts[c] = (counts[c] || 0) + l.n; }));
   return Object.keys(counts).sort((a, b) => counts[b] - counts[a])[0];
+}
+// Passages per airport (departures and arrivals together), history included
+function airportPassages() {
+  const counts = {};
+  allLegs().forEach(l => {
+    counts[l.a] = (counts[l.a] || 0) + l.n;
+    if (l.b !== l.a) counts[l.b] = (counts[l.b] || 0) + l.n;
+  });
+  return counts;
 }
 
 const STAMP_COLORS = ['#B23A2E', '#1E7864', '#2E6DAE', '#7A4FB0', '#B5651D', '#A33A6B', '#3E7D2A', '#9A6A12', '#2B6E8F', '#8C2A37'];
@@ -521,7 +672,8 @@ function stampHTML(row, i) {
   const rot = ((row.cc.charCodeAt(0) * 7 + row.cc.charCodeAt(1) * 3) % 15) - 7;
   const sub = row.status === 'land' ? 'sans avion'
     : row.status === 'stopover' ? 'escale'
-    : `${row.first.slice(0, 4)}${row.trips > 1 ? ' · ' + row.trips + '×' : ''}`;
+    : row.first ? `${row.first.slice(0, 4)}${row.trips > 1 ? ' · ' + row.trips + '×' : ''}`
+    : plural(row.n, 'vol', 'vols');
   return `<button type="button" class="stamp ${cls}" style="${color}transform:rotate(${rot}deg)" data-country="${esc(row.cc)}" title="${esc(countryName(row.cc))} : ${esc(STATUS_LABEL[row.status])}. Cliquer pour changer.">
     <span class="flag">${countryFlag(row.cc)}</span><span class="cn">${esc(countryName(row.cc))}</span><span class="yr">${esc(sub)}</span></button>`;
 }
@@ -567,7 +719,7 @@ function miniWorldSVG(info) {
     ${miniWorldPaths().map(p => `<path class="${st[p.cc] === 'v' ? 'v' : st[p.cc] === 's' ? 's' : ''}" d="${p.d}"/>`).join('')}
     <g class="dots">${dots}</g></svg>`;
 }
-function usedAirportsAll() { return [...new Set(flights.flatMap(f => [f.from, f.to]))].filter(c => AIRPORTS[c]); }
+function usedAirportsAll() { return [...new Set([...flights, ...routes].flatMap(f => [f.from, f.to]))].filter(c => AIRPORTS[c]); }
 
 // Departure board: each value written in split-flap tiles
 function flapTiles(text) {
@@ -577,20 +729,24 @@ function shortType(t) { return String(t || '').replace(/^(Boeing|Airbus|Embraer|
 
 function renderPassport() {
   const el = $('passport');
-  if (!flights.length) {
+  if (!flights.length && !hasHistory()) {
     el.innerHTML = '<div class="empty-state"><div class="emoji">🛂</div><p>Le passeport se remplit avec les vols.</p><button class="btn btn-primary" onclick="openModal()">+ Ajouter le premier vol</button></div>';
     return;
   }
+  const H = hasHistory();
   const info = countryInfo();
-  const km = flights.reduce((s, f) => s + (f.distKm || 0), 0);
-  const mins = flights.reduce((s, f) => s + (f.durationMin || 0), 0);
+  const T = logTotals();
+  const km = T.km;
+  const mins = H ? T.mins : flights.reduce((s, f) => s + (f.durationMin || 0), 0);
   const airports = usedAirportsAll().length;
   const first = flights.reduce((m, f) => f.date < m ? f.date : m, '9999');
   const last = flights.reduce((m, f) => f.date > m ? f.date : m, '0000');
   const hours = Math.floor(mins / 60);
   const nCountries = info.visited.length;
-  const totalCO2 = flights.reduce((s, f) => s + co2Of(f), 0);
+  const totalCO2 = T.co2;
   const home = homeAirport();
+  const label = CARNETS[carnet].label;
+  if (H) { renderPassportHistory(el, { info, T, hours, airports, nCountries, home, first, last, label }); return; }
   const longest = [...flights].filter(f => f.durationMin > 0).sort((a, b) => b.durationMin - a.durationMin)[0];
   const count = key => { const o = {}; flights.forEach(f => { if (f[key]) o[f[key]] = (o[f[key]] || 0) + 1; }); return Object.entries(o).sort((a, b) => b[1] - a[1]); };
   const types = count('aircraftType'), airlines = count('airline');
@@ -609,7 +765,7 @@ function renderPassport() {
   el.innerHTML = `
     <div class="cover">
       <div class="cover-top">
-        <div><div class="cover-kicker">Carnet de vol · ${esc(home || '')}</div><h1>Passeport<br>de voyage</h1></div>
+        <div><div class="cover-kicker">Carnet de vol ${esc(CARNETS[carnet].of)} · ${esc(home || '')}</div><h1>Passeport<br>de voyage</h1></div>
         <div class="emblem" aria-hidden="true">✈</div>
       </div>
       <div class="cover-map">${miniWorldSVG(info)}</div>
@@ -627,7 +783,7 @@ function renderPassport() {
         <div><span>Dernier vol</span><b>${formatDate(last)}</b></div>
         <div><span>Aéroport d'attache</span><b>${esc(home || '–')} · ${esc(city(home))}</b></div>
       </div>
-      <div class="mrz" aria-hidden="true">${esc(pad('P<NOR<<CARNET<DE<VOL'))}<br>${esc(pad(`${flights.length}FLT<${Math.round(km)}KM<${nCountries}PAYS<${first.slice(0, 4)}`))}</div>
+      <div class="mrz" aria-hidden="true">${esc(pad(`P<NOR<<${label.toUpperCase()}<<CARNET<DE<VOL`))}<br>${esc(pad(`${flights.length}FLT<${Math.round(km)}KM<${nCountries}PAYS<${first.slice(0, 4)}`))}</div>
     </div>
 
     <h2 class="sec-title" id="stamps">Tampons</h2>
@@ -659,12 +815,93 @@ function renderPassport() {
   addShowMore('stamps-stopover', 8);
 }
 
+// Passport of a logbook with a history (Arnaud): the history has routes and counts, no dates.
+// Hours are estimated from the distance, like in Arnaud's Excel.
+function renderPassportHistory(el, { info, T, hours, airports, nCountries, home, last, label }) {
+  const km = T.km;
+  const legs = T.legs.filter(l => l.a !== l.b);   // loops (local flights) have no route on the map
+  const longest = [...legs].sort((a, b) => b.km - a.km)[0];
+  const frequent = [...legs].sort((a, b) => b.n - a.n || b.km - a.km)[0];
+  const passages = airportPassages();
+  const airlines = new Set([...airlinesList, ...flights.map(f => f.airline).filter(Boolean)]);
+  const pad = s => (s + '<'.repeat(44)).slice(0, 44);
+  const flags = info.visited.map(r => countryFlag(r.cc)).join(' ');
+  const row = (lbl, value, sub, onclick) => `<button type="button" class="board-row" onclick="${onclick}">
+      <span class="board-label">${lbl}</span>${flapTiles(value)}<span class="board-sub">${sub}</span></button>`;
+
+  el.innerHTML = `
+    <div class="cover">
+      <div class="cover-top">
+        <div><div class="cover-kicker">Carnet de vol ${esc(CARNETS[carnet].of)} · ${esc(home || '')}</div><h1>Passeport<br>de voyage</h1></div>
+        <div class="emblem" aria-hidden="true">✈</div>
+      </div>
+      <div class="cover-map">${miniWorldSVG(info)}</div>
+      <div class="cover-flags" title="Pays visités">${flags}</div>
+      <div class="kpis">
+        <button class="kpi" onclick="showView('flights')"><b>${fmtInt(T.n)}</b><span>vols</span></button>
+        <button class="kpi" onclick="showDistancePopup()"><b>${fmtInt(km)}</b><span>km · ${(km / 40075).toFixed(1)}× la Terre</span></button>
+        <button class="kpi" onclick="showDurationPopup()"><b>${fmtInt(hours)} h</b><span>dans les airs (estimé)</span></button>
+        <button class="kpi" onclick="document.getElementById('stamps').scrollIntoView({behavior:'smooth',block:'start'})"><b>${nCountries}</b><span>pays visités</span></button>
+        <button class="kpi" onclick="showAirportsPopup()"><b>${airports}</b><span>aéroports</span></button>
+        <button class="kpi" onclick="showView('flights')"><b>${T.legs.length}</b><span>trajets différents</span></button>
+      </div>
+      <div class="cover-fields">
+        <div><span>Historique</span><b>${historyUntil ? 'jusqu\'au ' + formatDate(historyUntil) : '–'}</b></div>
+        <div><span>Dernier vol saisi</span><b>${flights.length ? formatDate(last) : 'à venir'}</b></div>
+        <div><span>Aéroport d'attache</span><b>${esc(home || '–')} · ${esc(city(home))}</b></div>
+      </div>
+      <div class="mrz" aria-hidden="true">${esc(pad(`P<<<<<${label.toUpperCase()}<<CARNET<DE<VOL`))}<br>${esc(pad(`${T.n}FLT<${Math.round(km)}KM<${nCountries}PAYS<${T.legs.length}TRJ`))}</div>
+    </div>
+
+    <h2 class="sec-title" id="stamps">Tampons</h2>
+    <div class="legend">
+      <span><i class="dot"></i>visité en avion</span>
+      <span><i class="dot d"></i>visité sans avion</span>
+      <span><i class="dot g"></i>escale seulement</span>
+      <span class="muted">L'historique n'a pas de dates : chaque pays compte comme visité. Un clic sur un tampon change son statut.</span>
+    </div>
+    <div class="stamps" id="stamps-visited">
+      ${info.visited.map(stampHTML).join('')}
+      <button type="button" class="stamp add" onclick="openAddCountry()" title="Ajouter un pays visité sans avion"><span class="flag">+</span><span class="cn">Ajouter un pays</span><span class="yr">sans avion</span></button>
+    </div>
+    ${info.stopover.length ? `<h2 class="sec-title" style="font-size:19px;margin-top:26px">Seulement en escale</h2>
+    <div class="stamps" id="stamps-stopover">${info.stopover.map(stampHTML).join('')}</div>` : ''}
+
+    <h2 class="sec-title">Tableau des records</h2>
+    <div class="board">
+      <div class="board-head"><span>Records</span><span>Valeur</span><span>Détail</span></div>
+      ${row('Heures en vol', fmtInt(hours), `estimées (distance ÷ 750 km/h), soit ${(mins2days(T.mins))} jours`, 'showDurationPopup()')}
+      ${longest ? row('Trajet le plus long', `${longest.a}-${longest.b}`, `${fmtInt(longest.km)} km · ${esc(city(longest.a))} ↔ ${esc(city(longest.b))} · ${plural(longest.n, 'vol', 'vols')}`, `openRouteOnMap('${longest.key}')`) : ''}
+      ${frequent ? row('Trajet favori', `${frequent.a}-${frequent.b}`, `${plural(frequent.n, 'vol', 'vols')} · ${esc(city(frequent.a))} ↔ ${esc(city(frequent.b))}`, `openRouteOnMap('${frequent.key}')`) : ''}
+      ${home ? row('Aéroport principal', home, `${fmtInt(passages[home])} passages · ${esc(city(home))}`, `openAirportOnMap('${home}')`) : ''}
+      ${row('Tours de la Terre', (km / 40075).toFixed(1) + 'X', `${fmtInt(km)} km parcourus`, 'showDistancePopup()')}
+      ${airlines.size ? row('Compagnies', String(airlines.size), 'compagnies différentes', "showView('analytics')") : ''}
+      ${row('CO₂e estimé', (T.co2 / 1000).toFixed(0) + 'T', 'en classe économique, forçage radiatif inclus', 'showCO2Popup()')}
+    </div>`;
+  addShowMore('stamps-visited', 8);
+  addShowMore('stamps-stopover', 8);
+}
+const mins2days = mins => (mins / 60 / 24).toFixed(1);
+
+// From another tab: open the map on one route or one airport
+function openRouteOnMap(key) {
+  mapYear = '';
+  mapSelection = { type: 'route', key };
+  showView('map');
+}
+function openAirportOnMap(code) {
+  mapYear = '';
+  showView('map');
+  focusAirport(code);
+}
+
 // ─── Country sheet: change the status of one country ───
 function openCountrySheet(cc) {
   const info = countryInfo();
   const row = [...info.visited, ...info.stopover].find(r => r.cc === cc);
   if (!row) return;
   const list = flights.filter(f => AIRPORTS[f.from]?.country === cc || AIRPORTS[f.to]?.country === cc).sort(byDateDesc);
+  const hist = routes.filter(r => AIRPORTS[r.from]?.country === cc || AIRPORTS[r.to]?.country === cc).sort((a, b) => b.count - a.count);
   const opt = (status, label, help) => `<button type="button" class="${row.status === status ? 'on' : ''}" data-set-status="${status}">
       <span>${status === 'stopover' ? '◌' : status === 'land' ? '◍' : '●'}</span><span>${label}<small>${help}</small></span></button>`;
   const body = row.status === 'land'
@@ -675,7 +912,9 @@ function openCountrySheet(cc) {
         ${opt('stopover', 'Escale seulement', 'Correspondance sans y séjourner. Ne compte pas.')}
        </div>
        ${row.overridden ? `<p class="muted" style="margin:-4px 0 12px">Choix fait à la main. Le calcul automatique donnait « ${esc(STATUS_LABEL[row.auto])} ». <button type="button" class="mp-link" data-set-status="auto">Revenir au calcul automatique</button></p>` : `<p class="muted" style="margin:-4px 0 12px">Statut calculé automatiquement à partir des vols.</p>`}
-       ${list.length ? `<div class="section-label">${plural(list.length, 'vol', 'vols')}</div>
+       ${hist.length ? `<div class="section-label">Historique : ${plural(hist.reduce((s, r) => s + r.count, 0), 'vol', 'vols')}</div>
+       <ul class="stat-popup-list">${hist.map((r, i) => routeLi(r.from, r.to, i, `${r.count}×`, `${fmtInt(r.distKm)} km`)).join('')}</ul>` : ''}
+       ${list.length ? `<div class="section-label">${plural(list.length, 'vol', 'vols')}${hist.length ? ' saisis en détail' : ''}</div>
        <ul class="stat-popup-list">${list.map((f, i) => flightLi(f, i, esc(f.airline || ''))).join('')}</ul>` : ''}`;
   showStatPopup(`${countryFlag(cc)} ${countryName(cc)}`, body);
   $('stat-popup-body').dataset.country = cc;
@@ -748,7 +987,34 @@ function flightLi(f, i, value, valueStyle = '') {
   </li>`;
 }
 
+// One route of the history in a popup list
+function routeLi(a, b, i, value, sub) {
+  return `<li>
+    <span class="stat-popup-rank">${i + 1}</span>
+    <span class="stat-popup-label" style="color:var(--accent2)">${esc(a)} ${a === b ? '↺' : '↔ ' + esc(b)}</span>
+    <span class="stat-popup-sub">${a === b ? esc(city(a)) + ', vols locaux' : esc(city(a)) + ' ↔ ' + esc(city(b))}${sub ? ', ' + sub : ''}</span>
+    <span class="stat-popup-value">${value}</span>
+  </li>`;
+}
+// Routes of a logbook with a history, sorted by a value; used by the passport figures
+function showLegsPopup(title, val, fmt, note) {
+  const legs = allLegs().filter(l => val(l) > 0).sort((a, b) => val(b) - val(a));
+  showStatPopup(title, `${note ? `<p class="muted" style="margin-bottom:8px">${note}</p>` : ''}
+    <ul class="stat-popup-list">${legs.map((l, i) => routeLi(l.a, l.b, i, fmt(l), plural(l.n, 'vol', 'vols'))).join('')}</ul>`);
+}
+
 function showAirportsPopup() {
+  if (hasHistory()) {
+    const p = airportPassages();
+    const rows = Object.keys(p).filter(c => AIRPORTS[c]).sort((a, b) => p[b] - p[a]).map((c, i) => `<li>
+        <span class="stat-popup-rank">${i + 1}</span>
+        <span class="stat-popup-label" style="color:var(--accent2);font-weight:700">${esc(c)}</span>
+        <span class="stat-popup-sub">${esc(`${AIRPORTS[c].city}, ${countryName(AIRPORTS[c].country)}`)}</span>
+        <span class="stat-popup-value" title="départs et arrivées">${fmtInt(p[c])}</span>
+      </li>`).join('');
+    showStatPopup('🏢 Aéroports, par nombre de passages', `<ul class="stat-popup-list">${rows}</ul>`);
+    return;
+  }
   if (!flights.length) return;
   const dep = {}, arr = {};
   flights.forEach(f => {
@@ -771,6 +1037,10 @@ function showAirportsPopup() {
 }
 
 function showCO2Popup() {
+  if (hasHistory()) {
+    showLegsPopup('🌱 Trajets par CO₂e (total)', l => l.n * calcCO2(l.km, 'economy'), l => formatCO2(l.n * calcCO2(l.km, 'economy')), 'Estimation en classe économique, forçage radiatif inclus.');
+    return;
+  }
   if (!flights.length) return;
   const rows = [...flights].sort((a, b) => co2Of(b) - co2Of(a))
     .map((f, i) => flightLi(f, i, formatCO2(co2Of(f)), 'color:var(--green)')).join('');
@@ -778,6 +1048,10 @@ function showCO2Popup() {
 }
 
 function showDurationPopup() {
+  if (hasHistory()) {
+    showLegsPopup('⏱️ Trajets par heures en vol (total)', l => l.n * l.km, l => `${fmtInt(l.n * l.km / 750)} h`, 'Heures estimées : distance ÷ 750 km/h, comme dans le fichier Excel.');
+    return;
+  }
   if (!flights.length) return;
   const list = flights.filter(f => f.durationMin > 0).sort((a, b) => b.durationMin - a.durationMin);
   if (!list.length) {
@@ -789,6 +1063,10 @@ function showDurationPopup() {
 }
 
 function showDistancePopup() {
+  if (hasHistory()) {
+    showLegsPopup('🌍 Trajets par distance (du plus long au plus court)', l => l.km, l => `${fmtInt(l.km)} km`);
+    return;
+  }
   if (!flights.length) return;
   const rows = flights.filter(f => f.distKm > 0).sort((a, b) => b.distKm - a.distKm)
     .map((f, i) => flightLi(f, i, `${fmtInt(f.distKm)} km`)).join('');
@@ -831,7 +1109,72 @@ function flightTicket(f, showYear) {
   </li>`;
 }
 
+// "Trajets" (logbook with a history): one line per pair of airports, history and detailed flights together
+const ROUTE_SORTS = {
+  count: { label: 'Plus fréquents', val: l => l.n },
+  dist: { label: 'Plus longs', val: l => l.km },
+  total: { label: 'Distance cumulée', val: l => l.n * l.km },
+  code: { label: 'A → Z', val: null }
+};
+let routeSort = 'count';
+
+function routeRow(l) {
+  const loop = l.a === l.b;
+  const A = AIRPORTS[l.a] || {}, B = AIRPORTS[l.b] || {};
+  const countries = loop || A.country === B.country ? `${countryFlag(A.country)} ${esc(countryName(A.country || ''))}`
+    : `${countryFlag(A.country)} ${esc(countryName(A.country || ''))} ↔ ${countryFlag(B.country)} ${esc(countryName(B.country || ''))}`;
+  return `<li class="fl rt${loop ? ' loop' : ''}" ${loop ? '' : `data-route="${esc(l.key)}" tabindex="0" role="button" aria-label="Voir le trajet ${esc(l.a)} ${esc(l.b)} sur la carte"`}>
+    <div class="fl-date"><b>${l.n}</b><span>${l.n > 1 ? 'vols' : 'vol'}</span></div>
+    <div class="fl-route">
+      <div class="fl-codes">${esc(l.a)}<i aria-hidden="true">${loop ? '↺' : '↔'}</i>${loop ? '' : esc(l.b)}</div>
+      <div class="fl-sub">${loop ? `${esc(city(l.a))}, boucle sans escale` : `${esc(city(l.a))} ↔ ${esc(city(l.b))}`}</div>
+    </div>
+    <div class="fl-air">
+      <div>${countries}</div>
+      <div class="fl-sub">${l.flights ? `dont ${plural(l.flights, 'vol saisi', 'vols saisis')} en détail` : ' '}</div>
+    </div>
+    <div class="fl-num">
+      <div>${formatDist(l.km)}</div>
+      <div class="fl-sub">${l.n > 1 ? `${fmtInt(l.n * l.km)} km en tout` : ' '}</div>
+    </div>
+    <div class="fl-tags"></div>
+  </li>`;
+}
+
+function renderRoutesTable() {
+  const search = norm($('search-input').value);
+  const all = allLegs();
+  const legs = all.filter(l => {
+    if (!search) return true;
+    const A = AIRPORTS[l.a] || {}, B = AIRPORTS[l.b] || {};
+    return norm([l.a, l.b, A.city, B.city, A.name, B.name, countryName(A.country || ''), countryName(B.country || '')].join(' ')).includes(search);
+  });
+  const s = ROUTE_SORTS[routeSort];
+  legs.sort((a, b) => s.val ? (s.val(b) - s.val(a)) || a.key.localeCompare(b.key) : a.key.localeCompare(b.key));
+  const n = legs.reduce((t, l) => t + l.n, 0), km = legs.reduce((t, l) => t + l.n * l.km, 0);
+  $('flights-count').textContent = `${plural(legs.length, 'trajet', 'trajets')} · ${fmtInt(n)} vols · ${fmtInt(km)} km${legs.length !== all.length ? ` (sur ${all.length} trajets)` : ''}`;
+  const pills = `<div class="pills" role="group" aria-label="Trier">${Object.entries(ROUTE_SORTS).map(([k, v]) =>
+    `<button type="button" class="pill${k === routeSort ? ' on' : ''}" data-route-sort="${k}" aria-pressed="${k === routeSort}">${v.label}</button>`).join('')}</div>`;
+  const detailed = [...flights].filter(f => {
+    if (!search) return true;
+    const a = AIRPORTS[f.from] || {}, b = AIRPORTS[f.to] || {};
+    return norm([f.from, f.to, f.airline, f.flightNumber, a.city, b.city, f.coTravelers].join(' ')).includes(search);
+  }).sort(byDateDesc);
+  $('flights-table').innerHTML = pills
+    + (legs.length ? `<ol class="fl-list">${legs.map(routeRow).join('')}</ol>` : '<div class="empty-state"><div class="emoji">🔍</div><p>Aucun trajet ne correspond à cette recherche.</p></div>')
+    + `<section class="fl-year" style="margin-top:26px">
+        <div class="fl-year-head"><h2>Vols saisis en détail</h2><span>${historyUntil ? `après le ${formatDate(historyUntil)}` : ''}</span></div>
+        ${detailed.length ? `<ol class="fl-list">${detailed.map(f => flightTicket(f, true)).join('')}</ol>`
+          : `<div class="empty-state" style="padding:28px 20px"><p>Les prochains vols se saisissent avec « + Ajouter un vol ». Ils comptent aussi dans les trajets ci-dessus.</p></div>`}
+      </section>`;
+}
+
 function renderFlightsTable() {
+  const H = hasHistory();
+  $('view-flights').querySelector('.fl-title').textContent = H ? 'Trajets' : 'Mes vols';
+  $('search-input').placeholder = H ? 'Aéroport, ville, pays…' : 'Aéroport, ville, compagnie, avion, accompagnant…';
+  $('filter-year').hidden = H; $('sort-select').hidden = H;
+  if (H) { $('filter-class').hidden = true; renderRoutesTable(); return; }
   updateYearFilter();
   // The class filter appears only when the logbook has more than one class
   const multiClass = new Set(flights.map(f => f.cabinClass)).size > 1;
@@ -1170,8 +1513,10 @@ function whenMapReady(fn) {
 
 let mapYear = '';   // '' = every year
 function mapFlights() { return mapYear ? flights.filter(f => f.date.startsWith(mapYear)) : flights; }
+// Pairs of airports on the map; the history (no dates) shows only when every year is on the map
+function mapLegsAll() { return Object.values(legMap(mapFlights(), !mapYear)).filter(l => AIRPORTS[l.a] && AIRPORTS[l.b]); }
 function usedAirports() {
-  return [...new Set(mapFlights().flatMap(f => [f.from, f.to]))].filter(c => AIRPORTS[c]);
+  return [...new Set(mapLegsAll().flatMap(l => [l.a, l.b]))];
 }
 
 function fitMap(force) {
@@ -1216,25 +1561,21 @@ function renderMap() {
     info.stopover.forEach(r => { status[r.cc] = 'stopover'; });
     mapgl.getSource('countries').setData(worldGeoJSON(status));
 
-    // One line per pair of airports, both directions together
-    const routes = {};
-    mapFlights().forEach(f => {
-      if (!AIRPORTS[f.from] || !AIRPORTS[f.to]) return;
-      const k = routeKey(f.from, f.to);
-      (routes[k] = routes[k] || { a: f.from, b: f.to, n: 0 }).n++;
-    });
-    routeKeys = new Set(Object.keys(routes));
+    // One line per pair of airports, both directions together. A loop (local flights) has no line.
+    const legs = mapLegsAll();
+    const lines = legs.filter(l => l.a !== l.b);
+    routeKeys = new Set(lines.map(l => l.key));
     mapgl.getSource('routes').setData({
       type: 'FeatureCollection',
-      features: Object.entries(routes).map(([k, r]) => {
+      features: lines.map(r => {
         const A = AIRPORTS[r.a], B = AIRPORTS[r.b];
-        return { type: 'Feature', properties: { key: k, a: r.a, b: r.b, n: r.n },
+        return { type: 'Feature', properties: { key: r.key, a: r.a, b: r.b, n: r.n },
           geometry: { type: 'LineString', coordinates: greatCirclePoints(A.lat, A.lon, B.lat, B.lon, 64).map(([la, lo]) => [lo, la]) } };
       })
     });
 
     const counts = {};
-    mapFlights().forEach(f => { counts[f.from] = (counts[f.from] || 0) + 1; counts[f.to] = (counts[f.to] || 0) + 1; });
+    legs.forEach(l => { counts[l.a] = (counts[l.a] || 0) + l.n; if (l.b !== l.a) counts[l.b] = (counts[l.b] || 0) + l.n; });
     airportCodes = new Set(usedAirports());
     mapgl.getSource('airports').setData({
       type: 'FeatureCollection',
@@ -1253,13 +1594,14 @@ function renderMap() {
 const EXT_LABEL = { n: 'Le plus au nord', s: 'Le plus au sud', e: 'Le plus à l\'est', w: 'Le plus à l\'ouest' };
 function renderMapHeader() {
   const aps = usedAirports();
-  const routes = new Set(mapFlights().map(f => routeKey(f.from, f.to)));
+  const nRoutes = mapLegsAll().length;
   const info = countryInfo();
   // The country count is for the whole logbook, so it is shown only when every year is on the map
-  $('map-summary').textContent = `${plural(aps.length, 'aéroport', 'aéroports')} · ${plural(routes.size, 'trajet', 'trajets')}${mapYear ? ' en ' + mapYear : ' · ' + plural(info.visited.length, 'pays visité', 'pays visités')}`;
+  $('map-summary').textContent = `${plural(aps.length, 'aéroport', 'aéroports')} · ${plural(nRoutes, 'trajet', 'trajets')}${mapYear ? ' en ' + mapYear : ' · ' + plural(info.visited.length, 'pays visité', 'pays visités')}`;
   const years = [...new Set(flights.map(f => f.date.slice(0, 4)))].sort().reverse();
   if (mapYear && !years.includes(mapYear)) mapYear = '';
-  $('map-years').innerHTML = ['', ...years].map(y => `<button type="button" class="pill${y === mapYear ? ' on' : ''}" data-map-year="${esc(y)}" aria-pressed="${y === mapYear}">${y ? esc(y) : 'Toutes les années'}</button>`).join('');
+  $('map-years').hidden = !years.length;
+  $('map-years').innerHTML = ['', ...years].map(y => `<button type="button" class="pill${y === mapYear ? ' on' : ''}" data-map-year="${esc(y)}" aria-pressed="${y === mapYear}">${y ? esc(y) : hasHistory() ? 'Tout, historique compris' : 'Toutes les années'}</button>`).join('');
 
   // Farthest north, south, east and west among the airports on the map
   const pick = better => aps.reduce((best, c) => (!best || better(AIRPORTS[c], AIRPORTS[best])) ? c : best, null);
@@ -1353,6 +1695,7 @@ function showAirportPanel(code) {
   const ap = AIRPORTS[code];
   if (!ap) return;
   const list = flights.filter(f => f.from === code || f.to === code).sort(byDateDesc);
+  if (hasHistory()) { showAirportPanelHistory(code, ap, list); return; }
   const deps = list.filter(f => f.from === code).length;
   const links = {};
   list.forEach(f => { const o = f.from === code ? f.to : f.from; links[o] = (links[o] || 0) + 1; });
@@ -1377,6 +1720,35 @@ function showAirportPanel(code) {
       `<button type="button" class="mp-chip" data-route="${esc(routeKey(code, o))}"><b>${esc(o)}</b> ${esc(city(o))} <span>×${n}</span></button>`).join('')}</div>
     <div class="mp-label">Vols</div>
     ${flightRows(list, code)}`, { type: 'airport', code });
+  loadAirportPhoto(code);
+}
+
+// Airport panel of a logbook with a history: passages and links, history included; detailed flights below
+function showAirportPanelHistory(code, ap, list) {
+  const legs = Object.values(legMap(mapYear ? mapFlights() : flights, !mapYear)).filter(l => l.a === code || l.b === code);
+  const passages = legs.reduce((s, l) => s + l.n, 0);
+  const hist = legs.reduce((s, l) => s + (l.n - l.flights), 0);
+  const links = legs.map(l => ({ o: l.a === code ? l.b : l.a, n: l.n, key: l.key, loop: l.a === l.b })).sort((a, b) => b.n - a.n);
+  openMapPanel(`
+    <div class="mp-photo" data-airport-photo="${esc(code)}"></div>
+    <div class="mp-head">
+      <div class="mp-code">${esc(code)}</div>
+      <div>
+        <div class="mp-title">${esc(ap.name)}</div>
+        <div class="mp-sub">${countryFlag(ap.country)} ${esc(ap.city)}, ${esc(countryName(ap.country))}</div>
+      </div>
+    </div>
+    <div class="mp-stats">
+      <div><b>${fmtInt(passages)}</b><span>${passages > 1 ? 'passages' : 'passage'}</span></div>
+      <div><b>${links.length}</b><span>${links.length > 1 ? 'liaisons' : 'liaison'}</span></div>
+      <div><b>${list.length}</b><span>${list.length > 1 ? 'vols saisis' : 'vol saisi'}</span></div>
+    </div>
+    ${hist ? `<div class="mp-note">Dont ${plural(hist, 'vol', 'vols')} de l'historique, sans date${historyUntil ? ` (jusqu'au ${formatDate(historyUntil)})` : ''}.</div>` : ''}
+    <div class="mp-label">Liaisons</div>
+    <div class="mp-chips">${links.map(x => x.loop
+      ? `<span class="mp-chip"><b>${esc(code)}</b> vols locaux <span>×${x.n}</span></span>`
+      : `<button type="button" class="mp-chip" data-route="${esc(x.key)}"><b>${esc(x.o)}</b> ${esc(city(x.o))} <span>×${x.n}</span></button>`).join('')}</div>
+    ${list.length ? `<div class="mp-label">Vols saisis</div>${flightRows(list, code)}` : ''}`, { type: 'airport', code });
   loadAirportPhoto(code);
 }
 
@@ -1436,10 +1808,30 @@ async function loadAirportPhoto(code) {
 function showRoutePanel(key) {
   const [a, b] = key.split('-');
   const list = flights.filter(f => routeKey(f.from, f.to) === key).sort(byDateDesc);
-  if (!list.length) return closeMapPanel();
+  const hist = mapYear ? 0 : routes.filter(r => routeKey(r.from, r.to) === key).reduce((s, r) => s + r.count, 0);
+  if (!list.length && !hist) return closeMapPanel();
   const airlines = [...new Set(list.map(f => f.airline).filter(Boolean))];
   const durs = list.map(f => f.durationMin).filter(m => m > 0);
   const avg = durs.length ? Math.round(durs.reduce((s, m) => s + m, 0) / durs.length) : 0;
+  const total = list.length + hist;
+  if (hasHistory()) {
+    const km = routes.find(r => routeKey(r.from, r.to) === key)?.distKm || getDistance(a, b) || 0;
+    openMapPanel(`
+      <div class="mp-head"><div class="mp-code mp-code-route">${esc(a)}<span>↔</span>${esc(b)}</div></div>
+      <div class="mp-sub" style="margin:-4px 0 12px">
+        <button type="button" class="mp-link" data-airport="${esc(a)}">${esc(city(a))}</button> ↔
+        <button type="button" class="mp-link" data-airport="${esc(b)}">${esc(city(b))}</button>
+      </div>
+      <div class="mp-stats">
+        <div><b>${total}</b><span>${total > 1 ? 'vols' : 'vol'}</span></div>
+        <div><b>${fmtInt(km)}</b><span>km par vol</span></div>
+        <div><b>${fmtInt(km * total)}</b><span>km en tout</span></div>
+      </div>
+      <div class="mp-note">${hist ? `${plural(hist, 'vol', 'vols')} dans l'historique, sans date. ` : ''}Durée estimée : ${avg ? fmtDur(avg) : fmtDur(Math.round(km / 750 * 60))}${avg ? ' (moyenne des vols saisis)' : ' (distance ÷ 750 km/h)'}.</div>
+      ${airlines.length ? `<div class="mp-note">${esc(airlines.join(', '))}</div>` : ''}
+      ${list.length ? `<div class="mp-label">Vols saisis</div>${flightRows(list)}` : ''}`, { type: 'route', key });
+    return;
+  }
   openMapPanel(`
     <div class="mp-head">
       <div class="mp-code mp-code-route">${esc(a)}<span>↔</span>${esc(b)}</div>
@@ -1521,7 +1913,9 @@ function renderJournal() {
   if (!flights.length) {
     $('journal-summary').textContent = '';
     $('journal-years').innerHTML = '';
-    el.innerHTML = '<div class="empty-state"><div class="emoji">📔</div><p>Aucun vol pour l\'instant.</p><button class="btn btn-primary" onclick="openModal()">+ Ajouter le premier vol</button></div>';
+    el.innerHTML = hasHistory()
+      ? `<div class="empty-state"><div class="emoji">📔</div><p>Le journal raconte les voyages vol par vol, avec les dates.<br>L'historique (${fmtInt(logTotals().n)} vols, sans dates) se trouve dans les onglets Trajets et Carte.</p><button class="btn btn-primary" onclick="openModal()">+ Ajouter un vol</button></div>`
+      : '<div class="empty-state"><div class="emoji">📔</div><p>Aucun vol pour l\'instant.</p><button class="btn btn-primary" onclick="openModal()">+ Ajouter le premier vol</button></div>';
     return;
   }
   const all = buildTrips().reverse();   // most recent trip first; flights inside a trip stay in order
@@ -1582,6 +1976,7 @@ function renderAnalytics() {
   charts.forEach(c => c.destroy());
   charts = [];
   const container = $('charts-container');
+  if (hasHistory()) { renderAnalyticsHistory(container); return; }
   if (!flights.length) {
     container.innerHTML = '<div class="empty-state"><div class="emoji">📊</div><p>Ajoutez des vols pour voir les statistiques.</p></div>';
     return;
@@ -1696,6 +2091,87 @@ function renderAnalytics() {
   simple('top-aircraft', topAircraft, 'var(--purple)');
   ['top-airports', 'top-routes', 'top-airlines', 'top-aircraft'].forEach(id => addShowMore(id, 8));
   renderSeatSummary();
+}
+
+// Statistics of a logbook with a history: no dates, so no years, months, seats or aircraft.
+// Everything here counts the history and the detailed flights together.
+const DIST_BUCKETS = [[0, 500, 'moins de 500'], [500, 1000, '500 à 1,000'], [1000, 2500, '1,000 à 2,500'], [2500, 5000, '2,500 à 5,000'], [5000, 10000, '5,000 à 10,000'], [10000, Infinity, 'plus de 10,000']];
+const HAULS = [['court', 'Court-courrier', 'moins de 1,500 km', 0, 1500, 'var(--accent)'], ['moyen', 'Moyen-courrier', '1,500 à 4,000 km', 1500, 4000, 'var(--yellow)'], ['long', 'Long-courrier', 'plus de 4,000 km', 4000, Infinity, 'var(--passport)']];
+
+function renderAnalyticsHistory(container) {
+  const T = logTotals();
+  const legs = T.legs;
+  const buckets = DIST_BUCKETS.map(([lo, hi]) => legs.filter(l => l.km >= lo && l.km < hi).reduce((s, l) => s + l.n, 0));
+  const maxB = Math.max(...buckets), topB = buckets.indexOf(maxB);
+  const hauls = HAULS.map(([k, name, range, lo, hi, color]) => {
+    const ls = legs.filter(l => l.km >= lo && l.km < hi);
+    return { k, name, range, color, n: ls.reduce((s, l) => s + l.n, 0), km: ls.reduce((s, l) => s + l.n * l.km, 0) };
+  });
+  const pct = (x, t) => t ? Math.round(x / t * 100) : 0;
+  const passages = airportPassages();
+  const byCountry = {};
+  Object.entries(passages).forEach(([c, n]) => { const cc = AIRPORTS[c]?.country; if (cc) byCountry[cc] = (byCountry[cc] || 0) + n; });
+  const top = o => Object.entries(o).sort((a, b) => b[1] - a[1]);
+  const topAirports = top(passages).filter(([c]) => AIRPORTS[c]);
+  const topRoutes = [...legs].sort((a, b) => b.n - a.n || b.km - a.km);
+  const topCountries = top(byCountry);
+  const counted = {};
+  flights.forEach(f => { if (f.airline) counted[f.airline] = (counted[f.airline] || 0) + 1; });
+  const airlines = [...new Set([...airlinesList, ...Object.keys(counted)])].sort((a, b) => a.localeCompare(b, 'fr'));
+  const rankCard = (id, title, sub) => `<section class="st-card"><div class="st-card-head"><h2>${title}</h2><span>${sub}</span></div><ol class="top-list" id="${id}"></ol></section>`;
+
+  container.innerHTML = `
+    <div class="st-head">
+      <h1 class="fl-title">Statistiques</h1>
+      <span class="muted">${fmtInt(T.n)} vols · ${plural(legs.length, 'trajet', 'trajets')}${historyUntil ? ` · historique jusqu'au ${formatDate(historyUntil)}` : ''}${flights.length ? ` · ${plural(flights.length, 'vol saisi', 'vols saisis')} ensuite` : ''}</span>
+    </div>
+
+    <div class="st-avg">
+      <div><b>${fmtInt(T.km / T.n)} km</b><span>par vol en moyenne</span></div>
+      <div><b>${fmtInt(T.mins / 60)} h</b><span>en vol (estimé)</span></div>
+      <div><b>${legs.length}</b><span>trajets différents</span></div>
+      <div><b>${pct(hauls[2].km, T.km)} %</b><span>des kilomètres en long-courrier</span></div>
+    </div>
+
+    <section class="st-card st-wide">
+      <div class="st-card-head"><h2>Court, moyen et long-courrier</h2><span>part des vols et des kilomètres</span></div>
+      <div class="haul-bar" aria-hidden="true">${hauls.map(h => `<span style="width:${pct(h.km, T.km)}%;background:${h.color}"></span>`).join('')}</div>
+      <div class="hauls">${hauls.map(h => `<div class="haul">
+          <div class="haul-name"><i style="background:${h.color}"></i>${h.name}<small>${h.range}</small></div>
+          <div class="haul-figs"><b>${fmtInt(h.n)}</b> vols · ${pct(h.n, T.n)} %</div>
+          <div class="haul-figs"><b>${fmtInt(h.km)}</b> km · ${pct(h.km, T.km)} %</div>
+        </div>`).join('')}</div>
+    </section>
+
+    <section class="st-card st-wide">
+      <div class="st-card-head"><h2>Distance des vols</h2><span>nombre de vols, en km</span></div>
+      <div class="months buckets">${buckets.map((n, i) => `<div class="month${i === topB ? ' top' : ''}" title="${DIST_BUCKETS[i][2]} km : ${plural(n, 'vol', 'vols')}">
+          <span class="mv">${n || ''}</span><span class="mb" style="height:${maxB ? Math.max(n ? 6 : 2, Math.round(n / maxB * 100)) : 2}%"></span><span class="ml">${DIST_BUCKETS[i][2]}</span></div>`).join('')}</div>
+    </section>
+
+    <div class="st-grid">
+      ${rankCard('top-airports', 'Aéroports', 'passages')}
+      ${rankCard('top-routes', 'Trajets', 'vols, aller et retour')}
+      ${rankCard('top-countries', 'Pays', 'passages dans les aéroports')}
+      <section class="st-card"><div class="st-card-head"><h2>Compagnies</h2><span>${airlines.length} différentes</span></div>
+        <div class="mp-chips" style="margin-top:4px">${airlines.map(a => `<span class="mp-chip">${esc(a)}${counted[a] ? ` <span>×${counted[a]}</span>` : ''}</span>`).join('')}</div>
+        <p class="muted" style="font-size:12px;margin-top:10px">L'historique ne dit pas quelle compagnie a fait quel vol : pas de classement.</p>
+      </section>
+    </div>
+    <p class="muted" style="font-size:12px;margin-top:16px">Les années, les mois, les sièges et les avions demandent des vols datés. Ils apparaîtront avec les vols saisis en détail.</p>`;
+
+  const bar = (n, max, color) => `<div class="bar-wrap"><div class="bar" style="width:${(n / max * 100).toFixed(0)}%;background:${color}"></div></div>`;
+  $('top-airports').innerHTML = topAirports.map(([c, n], i) => `<li>
+      <span class="rank">${i + 1}</span><span class="rk-code">${esc(c)}</span><span class="rk-name">${esc(city(c))}</span>
+      ${bar(n, topAirports[0][1], 'var(--accent)')}<span class="count">${n}</span></li>`).join('');
+  $('top-routes').innerHTML = topRoutes.map((l, i) => `<li>
+      <span class="rank">${i + 1}</span><span class="rk-code">${esc(l.a)} ${l.a === l.b ? '↺' : '↔ ' + esc(l.b)}</span>
+      <span class="rk-name">${l.a === l.b ? esc(city(l.a)) + ', vols locaux' : esc(city(l.a)) + ' · ' + esc(city(l.b))}</span>
+      ${bar(l.n, topRoutes[0].n, 'var(--yellow)')}<span class="count">${l.n}</span></li>`).join('');
+  $('top-countries').innerHTML = topCountries.map(([cc, n], i) => `<li>
+      <span class="rank">${i + 1}</span><span class="rk-name rk-main">${countryFlag(cc)} ${esc(countryName(cc))}</span>
+      ${bar(n, topCountries[0][1], 'var(--green)')}<span class="count">${n}</span></li>`).join('');
+  ['top-airports', 'top-routes', 'top-countries'].forEach(id => addShowMore(id, 8));
 }
 
 // Shows the first items of a list and a button for the rest. The choice is kept while the page is open.
@@ -1830,7 +2306,12 @@ function openModal(id) {
 
   const f = id ? flights.find(x => x.id === id) : null;
   if (id && !f) return;
-  $('modal-title').textContent = f ? 'Modifier le vol' : 'Ajouter un vol';
+  $('modal-title').textContent = f ? 'Modifier le vol' : `Ajouter un vol · ${CARNETS[carnet].label}`;
+  // A new flight can also go to the other logbook (a flight taken together)
+  $('also-other-wrap').hidden = !!f;
+  $('also-other').checked = false;
+  $('also-other-label').textContent = `Ajouter aussi au carnet ${CARNETS[otherCarnet()].of}`;
+  $('co-travelers').placeholder = carnet === 'liv' ? 'ex. Papa, Maman' : 'ex. Liv';
   $('flight-id').value = f ? f.id : '';
   if (f) {
     $('from-input').value = airportLabel(f.from); $('from-code').value = f.from;
@@ -1990,9 +2471,17 @@ async function saveFlight(e) {
     if (!ok) { if (uploaded) deletePhoto(uploaded, `Retrait d'une photo non utilisée`); return; }
 
     if (existing?.photo && existing.photo !== flight.photo) deletePhoto(existing.photo, `Retrait de l'ancienne photo du vol ${label}`);
+    const alsoOther = !existing && $('also-other').checked;
     closeModal('flight-modal');
     showToast(existing ? '✅ Vol modifié et enregistré.' : '✅ Vol ajouté et enregistré.');
     renderAll();
+    if (alsoOther) {
+      const other = CARNETS[otherCarnet()];
+      setStatus('busy', `Ajout au carnet ${other.of}…`);
+      copyToOtherCarnet(flight)
+        .then(r => { setStatus('ok'); showToast(r === 'exists' ? `Ce vol est déjà dans le carnet ${other.of}.` : `✅ Ajouté aussi au carnet ${other.of}.`); })
+        .catch(err => { setStatus('error', err.message); showToast(`Non ajouté au carnet ${other.of}. ${err.message || ''}`, true); });
+    }
   } catch (err) {
     setStatus('error', err.message);
     showToast(`Non enregistré. ${err.message || ''}`, true);
@@ -2343,8 +2832,8 @@ function download(blob, name) {
 }
 
 function exportData() {
-  if (!flights.length) { showToast('Aucun vol à exporter.', true); return; }
-  download(new Blob([JSON.stringify(buildDoc(), null, 2)], { type: 'application/json' }), `carnet-de-vol-${todayISO()}.json`);
+  if (!flights.length && !hasHistory()) { showToast('Aucun vol à exporter.', true); return; }
+  download(new Blob([JSON.stringify(buildDoc(), null, 2)], { type: 'application/json' }), `carnet-de-vol-${carnet}-${todayISO()}.json`);
   showToast('📦 Fichier JSON exporté. Les photos restent dans le dépôt GitHub.');
 }
 
@@ -2371,7 +2860,7 @@ async function exportExcel() {
   ws['!cols'] = [12, 8, 16, 8, 16, 20, 10, 14, 22, 14, 10, 12, 10, 10, 12, 10, 6, 22, 40, 6].map(wch => ({ wch }));
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Vols');
-  XLSX.writeFile(wb, `carnet-de-vol-${todayISO()}.xlsx`);
+  XLSX.writeFile(wb, `carnet-de-vol-${carnet}-${todayISO()}.xlsx`);
   showToast('📊 Fichier Excel exporté (sans les photos).');
 }
 
@@ -2506,12 +2995,19 @@ $('charts-container').addEventListener('click', e => {
   if (b && b.dataset.yearMode !== yearMode) { yearMode = b.dataset.yearMode; renderAnalytics(); }
 });
 $('flights-table').addEventListener('click', e => {
-  const item = e.target.closest('.fl');
+  const sort = e.target.closest('[data-route-sort]');
+  if (sort) { routeSort = sort.dataset.routeSort; renderRoutesTable(); return; }
+  const route = e.target.closest('[data-route]');
+  if (route) { openRouteOnMap(route.dataset.route); return; }
+  const item = e.target.closest('.fl[data-flight]');
   if (item) openFlightDetail(item.dataset.flight);
 });
 $('flights-table').addEventListener('keydown', e => {
-  const item = e.target.closest('.fl');
-  if (item && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); openFlightDetail(item.dataset.flight); }
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  const route = e.target.closest('[data-route]');
+  if (route) { e.preventDefault(); openRouteOnMap(route.dataset.route); return; }
+  const item = e.target.closest('.fl[data-flight]');
+  if (item) { e.preventDefault(); openFlightDetail(item.dataset.flight); }
 });
 $('journal').addEventListener('click', e => {
   const item = e.target.closest('.j-flight');
@@ -2530,11 +3026,20 @@ $('map-panel').addEventListener('click', e => {
   else if (t.dataset.airport) showAirportPanel(t.dataset.airport);
 });
 
+document.addEventListener('click', e => {
+  const b = e.target.closest('[data-carnet]');
+  if (b) switchCarnet(b.dataset.carnet);
+});
+window.addEventListener('hashchange', () => { const h = hashCarnet(); if (h && h !== carnet && cfg) switchCarnet(h); });
+
 async function init() {
   updateThemeButton();
+  carnet = hashCarnet() || storedCarnet() || 'liv';
+  if (hashCarnet()) { try { localStorage.setItem(CARNET_KEY, carnet); } catch (e) {} }
   cfg = readCfg();
   if (!cfg) { showSetup(); return; }
   showApp();
+  if (!hashCarnet() && !storedCarnet()) openWhoModal();
   const cached = readCache();
   if (cached?.doc) {
     try { applyDoc(cached.doc); dataSha = cached.sha || null; renderAll(); } catch (e) {}

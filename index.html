@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="robots" content="noindex, nofollow">
   <!-- Version du site : la changer ici ET dans version.txt a chaque mise a jour -->
-  <meta name="app-version" content="2026-11-12.20">
+  <meta name="app-version" content="2026-11-12.21">
   <title>Carnet de vol</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9C%88%EF%B8%8F%3C/text%3E%3C/svg%3E">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/maplibre-gl/5.24.0/maplibre-gl.css">
@@ -85,6 +85,23 @@
     .nav-tab:hover:not(.active){color:var(--text);border-color:var(--text3);}
     .nav-tab.active{background:var(--ink);color:var(--on-ink);border-color:var(--ink);}
 
+    /* Which logbook: Liv or Arnaud */
+    .who{display:inline-flex;background:var(--bg3);border:1px solid var(--border);border-radius:999px;padding:3px;gap:2px;margin-right:auto;flex-shrink:0;}
+    .who button{border:none;background:none;border-radius:999px;padding:5px 13px;font:600 13px var(--sans);color:var(--text2);cursor:pointer;transition:background .15s,color .15s;}
+    .who button:hover:not(.on){color:var(--text);}
+    .who button.on{background:var(--passport);color:var(--passport-hi);box-shadow:0 1px 3px rgba(0,0,0,.18);}
+    .who-modal{max-width:440px;text-align:center;}
+    .who-modal h2{font-family:var(--serif);font-size:26px;margin-bottom:6px;}
+    .who-cards{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:18px;}
+    .who-card{display:flex;flex-direction:column;align-items:center;gap:4px;padding:20px 12px;border-radius:var(--radius);border:1px solid var(--border);background:var(--card);color:var(--text);font-family:inherit;cursor:pointer;transition:border-color .15s,transform .15s;}
+    .who-card:hover{border-color:var(--accent);transform:translateY(-2px);}
+    .who-card b{font-family:var(--serif);font-size:20px;}
+    .who-card span:last-child{font-size:12px;color:var(--text3);}
+    .who-initial{width:52px;height:52px;border-radius:50%;background:var(--passport);color:var(--passport-hi);display:grid;place-items:center;font:600 24px var(--serif);margin-bottom:4px;}
+    .also-other{display:flex;gap:10px;align-items:flex-start;background:var(--bg3);border-radius:10px;padding:10px 12px;margin:2px 0 14px;cursor:pointer;font-size:14px;}
+    .also-other input{margin-top:3px;accent-color:var(--accent);width:16px;height:16px;flex-shrink:0;}
+    .also-other small{display:block;font-size:12px;color:var(--text3);}
+
     /* Sync status */
     #sync-status{font-size:12px;color:var(--text3);display:flex;align-items:center;gap:6px;white-space:nowrap;}
     #sync-status::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--text3);flex-shrink:0;}
@@ -145,8 +162,8 @@
     .cover-fields span{display:block;font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--gold-2);}
     .cover-fields b{font:500 14px var(--mono);color:var(--passport-hi);}
     .board{background:var(--flap);border:1px solid var(--border);border-radius:18px;padding:10px 16px 6px;color:var(--flap-ink);}
-    .board-head{display:grid;grid-template-columns:170px minmax(0,1fr) auto;gap:14px;font:500 10px var(--mono);letter-spacing:.14em;text-transform:uppercase;color:#8d7d5c;padding:6px 0 8px;border-bottom:1px solid #3a342c;}
-    .board-row{display:grid;grid-template-columns:170px minmax(0,1fr) auto;gap:14px;align-items:center;width:100%;text-align:left;background:none;border:none;border-bottom:1px solid #3a342c;padding:10px 0;font:inherit;color:inherit;cursor:pointer;}
+    .board-head{display:grid;grid-template-columns:170px auto minmax(0,1fr);gap:14px;font:500 10px var(--mono);letter-spacing:.14em;text-transform:uppercase;color:#8d7d5c;padding:6px 0 8px;border-bottom:1px solid #3a342c;}
+    .board-row{display:grid;grid-template-columns:170px auto minmax(0,1fr);gap:14px;align-items:center;width:100%;text-align:left;background:none;border:none;border-bottom:1px solid #3a342c;padding:10px 0;font:inherit;color:inherit;cursor:pointer;}
     .board-row:last-child{border-bottom:none;}
     .board-row:hover .tiles i{background:#3a332b;}
     .board-label{font:500 12px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:#d9c79f;}
@@ -384,6 +401,20 @@
     .month.top .mb{background:var(--accent);}
     .month .mv{font:500 11px var(--mono);color:var(--text2);min-height:14px;}
     .month .ml{font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.03em;}
+    .months.buckets{grid-template-columns:repeat(6,1fr);height:170px;}
+    .buckets .ml{text-transform:none;text-align:center;line-height:1.2;min-height:28px;letter-spacing:0;}
+    .haul-bar{display:flex;height:12px;border-radius:999px;overflow:hidden;background:var(--bg3);margin:4px 0 14px;}
+    .haul-bar span{display:block;height:100%;}
+    .hauls{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;}
+    .haul{border-top:1px solid var(--border);padding-top:10px;min-width:0;}
+    .haul-name{font-weight:600;display:flex;align-items:center;gap:6px;flex-wrap:wrap;}
+    .haul-name i{width:10px;height:10px;border-radius:3px;display:inline-block;}
+    .haul-name small{flex-basis:100%;font-weight:400;font-size:12px;color:var(--text3);}
+    .haul-figs{font-size:13px;color:var(--text2);margin-top:4px;}
+    .haul-figs b{font:500 15px var(--mono);color:var(--text);}
+    .fl.rt{grid-template-columns:62px minmax(0,1.2fr) minmax(0,1.3fr) 150px 0;}
+    .fl.rt .fl-date b{font-size:22px;}
+    .fl.loop{cursor:default;}
     .rk-code{font:500 13px var(--mono);color:var(--accent2);white-space:nowrap;}
     .rk-name{font-size:12px;color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;}
     .rk-name.rk-main{font-size:13px;color:var(--text);flex:0 1 45%;}
@@ -537,6 +568,7 @@
       .pass::before,.pass::after{display:none;}
       .map-legend{left:auto;right:10px;bottom:auto;top:10px;flex-direction:column;gap:4px;}
       .fl{grid-template-columns:54px minmax(0,1fr) auto;grid-template-areas:"date route num" "date air tags";gap:0 12px;padding-right:12px;}
+      .fl.rt{grid-template-columns:54px minmax(0,1fr) auto;}
       .fl-date{grid-area:date;}
       .fl-route{grid-area:route;padding:10px 0 0;}
       .fl-air{grid-area:air;padding:2px 0 10px;}
@@ -585,13 +617,18 @@
     }
     @media(min-width:481px){ .btn-add-short{display:none;} .nav-tab .sh{display:none;} }
     @media(max-width:480px){ .nav-tab .lg{display:none;} nav{gap:5px;} .nav-tab{padding:6px 11px;} }
+    @media(max-width:480px){ .logo-text{display:none;} .who button{padding:5px 11px;} .hauls{grid-template-columns:1fr;} .buckets .ml{font-size:9px;} }
   </style>
 </head>
 <body>
 
 <div class="top">
 <header>
-  <div class="logo"><span class="logo-mark">✈</span> Carnet de vol</div>
+  <div class="logo"><span class="logo-mark">✈</span> <span class="logo-text">Carnet de vol</span></div>
+  <div class="who" id="who" role="group" aria-label="Carnet affiché" hidden>
+    <button type="button" data-carnet="liv">Liv</button>
+    <button type="button" data-carnet="arnaud">Arnaud</button>
+  </div>
   <div class="header-actions" id="header-actions" hidden>
     <div id="sync-status" title=""><span></span></div>
     <button class="btn btn-primary" onclick="openModal()"><span class="btn-add-long">+ Ajouter un vol</span><span class="btn-add-short">+ Vol</span></button>
@@ -833,6 +870,11 @@
         <textarea id="notes" placeholder="Souvenirs de ce vol…"></textarea>
       </div>
 
+      <label class="also-other" id="also-other-wrap">
+        <input type="checkbox" id="also-other">
+        <span><span id="also-other-label">Ajouter aussi au carnet de Liv</span><small>Pour un vol fait ensemble. Le siège et la photo restent dans ce carnet.</small></span>
+      </label>
+
       <input type="hidden" id="remove-photo" value="0">
       <div class="form-group">
         <span class="lbl" style="display:block;font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.06em;margin-bottom:5px">📷 Photo du vol (facultatif)</span>
@@ -863,6 +905,18 @@
     <button class="modal-close" onclick="closeModal('stat-popup-modal')" aria-label="Fermer">✕</button>
     <h2 id="stat-popup-title"></h2>
     <div id="stat-popup-body"></div>
+  </div>
+</div>
+
+<!-- Which logbook, asked once per device -->
+<div class="modal-overlay" id="who-modal">
+  <div class="modal who-modal">
+    <h2>Quel carnet ouvrir ?</h2>
+    <p class="muted">Cet appareil s'en souviendra. Le bouton en haut de la page permet de changer à tout moment.</p>
+    <div class="who-cards">
+      <button type="button" class="who-card" data-carnet="liv"><span class="who-initial">L</span><b>Liv</b><span>Carnet de Liv</span></button>
+      <button type="button" class="who-card" data-carnet="arnaud"><span class="who-initial">A</span><b>Arnaud</b><span>Carnet d'Arnaud</span></button>
+    </div>
   </div>
 </div>
 
