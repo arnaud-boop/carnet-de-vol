@@ -1437,13 +1437,37 @@ function buildTrips() {
   });
 }
 
+let journalYear = '';   // '' = every year
+
+// The trip as a chain of airport codes: OSL → FRA → SIN … ; a connection (left the same day) is shown lighter
+function itineraryHTML(list) {
+  const parts = [];
+  list.forEach((f, i) => {
+    if (i === 0) parts.push(`<span>${esc(f.from)}</span>`);
+    else if (list[i - 1].to !== f.from) parts.push('<em>…</em>', `<span>${esc(f.from)}</span>`);
+    const next = list[i + 1];
+    const transit = next && next.from === f.to && next.date === arrivalDay(f);
+    parts.push(`<span class="${transit ? 'via' : ''}"${transit ? ' title="Correspondance"' : ''}>${esc(f.to)}</span>`);
+  });
+  return parts.join('<i aria-hidden="true">→</i>');
+}
+
 function renderJournal() {
   const el = $('journal');
   if (!flights.length) {
+    $('journal-summary').textContent = '';
+    $('journal-years').innerHTML = '';
     el.innerHTML = '<div class="empty-state"><div class="emoji">📔</div><p>Aucun vol pour l\'instant.</p><button class="btn btn-primary" onclick="openModal()">+ Ajouter le premier vol</button></div>';
     return;
   }
-  const trips = buildTrips().reverse();   // most recent trip first; flights inside a trip stay in order
+  const all = buildTrips().reverse();   // most recent trip first; flights inside a trip stay in order
+  const years = [...new Set(all.map(t => t.start.slice(0, 4)))];
+  if (journalYear && !years.includes(journalYear)) journalYear = '';
+  const trips = journalYear ? all.filter(t => t.start.startsWith(journalYear)) : all;
+  const nFlights = trips.reduce((s, t) => s + t.flights.length, 0);
+  $('journal-summary').textContent = `${plural(trips.length, 'voyage', 'voyages')} · ${plural(nFlights, 'vol', 'vols')}${journalYear ? ' en ' + journalYear : ''}`;
+  $('journal-years').innerHTML = ['', ...years].map(y => `<button type="button" class="pill${y === journalYear ? ' on' : ''}" data-journal-year="${esc(y)}" aria-pressed="${y === journalYear}">${y ? esc(y) : 'Toutes les années'}</button>`).join('');
+
   const byYear = {};
   trips.forEach(t => { (byYear[t.start.slice(0, 4)] = byYear[t.start.slice(0, 4)] || []).push(t); });
 
@@ -1454,12 +1478,18 @@ function renderJournal() {
     return `<div class="j-year"><h2>${esc(year)}</h2><span>${plural(list.length, 'voyage', 'voyages')} · ${plural(n, 'vol', 'vols')} · ${fmtInt(km)} km</span></div>
       ${list.map(t => {
         const days = daysBetween(t.start, t.end) + 1;
-        const dates = t.start === t.end ? formatDate(t.start) : `du ${formatDate(t.start)} au ${formatDate(t.end)} · ${days} jours`;
+        const dates = t.start === t.end ? formatDate(t.start) : `${formatDate(t.start)} → ${formatDate(t.end)}`;
         return `<article class="j-trip">
           <div class="j-trip-head">
             <div class="j-trip-title">${t.countries.length ? `<span class="j-trip-flags">${t.countries.map(countryFlag).join(' ')}</span>` : ''}${esc(t.places.join(' · '))}</div>
-            <div class="j-trip-sub">${dates}${t.via.length ? ` · via ${esc(t.via.join(', '))}` : ''}</div>
-            ${t.people.length ? `<div class="j-people">${t.people.map(p => `<span>${esc(p)}</span>`).join('')}</div>` : ''}
+            <div class="j-itin">${itineraryHTML(t.flights)}</div>
+            <div class="j-chips">
+              <span>${dates}</span>
+              ${days > 1 ? `<span>${days} jours</span>` : ''}
+              <span>${plural(t.flights.length, 'vol', 'vols')}</span>
+              <span>${fmtInt(t.km)} km</span>
+              ${t.people.map(p => `<span class="person">${esc(p)}</span>`).join('')}
+            </div>
           </div>
           <ol class="j-flights">${t.flights.map(f => `<li class="pass j-flight" data-flight="${esc(f.id)}" tabindex="0" role="button" aria-label="Voir le vol ${esc(f.from)} vers ${esc(f.to)} du ${formatDate(f.date)}">
               <div class="pass-main">
@@ -2396,6 +2426,10 @@ $('passport').addEventListener('click', e => {
 $('stat-popup-body').addEventListener('click', e => {
   const b = e.target.closest('[data-set-status]');
   if (b && $('stat-popup-body').dataset.country) setCountryStatus($('stat-popup-body').dataset.country, b.dataset.setStatus);
+});
+$('view-journal').addEventListener('click', e => {
+  const y = e.target.closest('[data-journal-year]');
+  if (y) { journalYear = y.dataset.journalYear; renderJournal(); }
 });
 $('view-map').addEventListener('click', e => {
   const y = e.target.closest('[data-map-year]');
