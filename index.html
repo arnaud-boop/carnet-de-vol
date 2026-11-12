@@ -5,11 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="robots" content="noindex, nofollow">
   <!-- Version du site : la changer ici ET dans version.txt a chaque mise a jour -->
-  <meta name="app-version" content="2026-11-12.8">
+  <meta name="app-version" content="2026-11-12.9">
   <title>Carnet de vol</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9C%88%EF%B8%8F%3C/text%3E%3C/svg%3E">
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/maplibre-gl/5.24.0/maplibre-gl.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/maplibre-gl/5.24.0/maplibre-gl.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
   <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=IBM+Plex+Mono:wght@500&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <script>try { document.documentElement.dataset.theme = localStorage.getItem('carnet_theme') || 'light'; } catch (e) { document.documentElement.dataset.theme = 'light'; }</script>
@@ -194,16 +194,20 @@
     /* Map */
     #map-container{position:relative;isolation:isolate;border-radius:18px;overflow:hidden;border:1px solid var(--border);}
     #map{height:max(440px,calc(100vh - 190px));background:var(--ocean);}
-    .leaflet-container{font-family:var(--sans);}
-    .leaflet-bar a,.leaflet-bar a:hover{background:var(--card);color:var(--text);border-bottom-color:var(--border);}
-    .leaflet-bar a:hover{background:var(--bg3);}
-    .leaflet-bar{border:1px solid var(--border)!important;box-shadow:none!important;border-radius:10px!important;overflow:hidden;}
-    .map-fit{font-size:16px;line-height:30px!important;text-decoration:none;}
-    .leaflet-control-attribution{background:var(--card)!important;color:var(--text3)!important;font-size:10px;opacity:.85;}
-    .leaflet-control-attribution a{color:var(--text2)!important;}
-    .map-tip{background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:8px;box-shadow:var(--shadow);font-size:12px;padding:4px 8px;}
-    .map-tip::before{display:none;}
-    .map-legend{position:absolute;left:12px;bottom:12px;z-index:900;background:var(--card);border:1px solid var(--border);border-radius:10px;padding:6px 10px;font-size:11px;color:var(--text2);display:flex;gap:12px;flex-wrap:wrap;}
+    .maplibregl-map{font-family:var(--sans);}
+    .maplibregl-ctrl-group{background:var(--card)!important;border:1px solid var(--border);box-shadow:none!important;border-radius:10px!important;overflow:hidden;}
+    .maplibregl-ctrl-group button{background-color:var(--card);}
+    .maplibregl-ctrl-group button+button{border-top:1px solid var(--border)!important;}
+    .maplibregl-ctrl-group button:hover{background-color:var(--bg3)!important;}
+    :root[data-theme="dark"] .maplibregl-ctrl-icon{filter:invert(1) hue-rotate(180deg);}
+    @media (prefers-color-scheme: dark){ :root[data-theme="auto"] .maplibregl-ctrl-icon{filter:invert(1) hue-rotate(180deg);} }
+    .map-fit{font-size:17px;color:var(--text);line-height:1;}
+    .maplibregl-ctrl-attrib{background:var(--card)!important;color:var(--text3)!important;font-size:10px;}
+    .maplibregl-ctrl-attrib a{color:var(--text2)!important;}
+    .maplibregl-cooperative-gesture-screen{background:rgba(30,20,10,.55);color:#fff;font-family:var(--sans);font-size:15px;}
+    .map-tip .maplibregl-popup-content{background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:8px;box-shadow:var(--shadow);font-size:12px;padding:4px 8px;}
+    .map-tip .maplibregl-popup-tip{display:none;}
+    .map-legend{position:absolute;left:12px;bottom:12px;pointer-events:none;z-index:900;background:var(--card);border:1px solid var(--border);border-radius:10px;padding:6px 10px;font-size:11px;color:var(--text2);display:flex;gap:12px;flex-wrap:wrap;}
     .map-legend i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:5px;vertical-align:-2px;}
 
     /* Map panel: beside the map on a computer, a sheet at the bottom on a phone */
@@ -409,6 +413,7 @@
       .pass{flex-direction:column;}
       .stub{width:auto;flex-direction:row;justify-content:space-around;border-left:none;border-top:2px dashed var(--border);border-radius:0 0 15px 15px;padding:10px 8px;}
       .pass::before,.pass::after{display:none;}
+      .map-legend{left:auto;right:10px;bottom:auto;top:10px;flex-direction:column;gap:4px;}
       .pass-route b{font-size:24px;}
       .j-year h2{font-size:34px;}
       .j-trip-title{font-size:21px;}

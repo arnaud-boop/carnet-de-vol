@@ -450,7 +450,7 @@ function pickImport() { $('import-file').click(); }
 // ═══════════════════════════════════════
 //  VIEWS
 // ═══════════════════════════════════════
-let leafletMap = null, mapLayers = [], charts = [];
+let charts = [];
 
 function showView(name) {
   document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.id === 'view-' + name));
@@ -940,55 +940,145 @@ function greatCirclePoints(lat1, lon1, lat2, lon2, n = 80) {
   return pts;
 }
 
-// The background map is drawn from country outlines shipped with the site (world.js).
-// No map provider, no key, and it works offline.
-let countryLayers = null;      // country code -> list of Leaflet polygons
-let routeLayers = {}, markerLayers = {};
+// The map is drawn by MapLibre (WebGL) from the country outlines shipped with
+// the site (world.js): no map provider, no key, smooth zoom, and a globe view.
+let mapgl = null, mapReady = false, mapReadyQueue = [];
+let routeKeys = new Set(), airportCodes = new Set();
 let fittedFor = '';            // airports the map was last framed on
 let mapSelection = null;       // { type: 'airport', code } or { type: 'route', key }
+let hoverPopup = null;
 
 const cssVar = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 const routeKey = (a, b) => [a, b].sort().join('-');
 const plural = (n, one, many) => `${n} ${n > 1 ? many : one}`;
+const coarsePointer = () => window.matchMedia('(pointer: coarse)').matches;
 
 function decodeRings(rings) {
   return rings.map(r => {
     const pts = [];
     let x = 0, y = 0;
-    for (let i = 0; i < r.length; i += 2) { x += r[i]; y += r[i + 1]; pts.push([y / 100, x / 100]); }
-    return [pts];
+    for (let i = 0; i < r.length; i += 2) { x += r[i]; y += r[i + 1]; pts.push([x / 100, y / 100]); }
+    return pts;
   });
+}
+// Each ring becomes its own polygon: holes are rare and too small to matter here
+let worldFeatures = null;
+function worldGeoJSON(status) {
+  if (!worldFeatures && typeof WORLD !== 'undefined') {
+    worldFeatures = WORLD.countries.map(c => ({
+      type: 'Feature', properties: { cc: c.c || '' },
+      geometry: { type: 'MultiPolygon', coordinates: decodeRings(c.r).map(ring => [ring]) }
+    }));
+  }
+  return {
+    type: 'FeatureCollection',
+    features: (worldFeatures || []).map(f => ({ ...f, properties: { cc: f.properties.cc, status: status[f.properties.cc] || 'other' } }))
+  };
+}
+
+function mapPaint() {
+  return {
+    ocean: cssVar('--ocean'), land: cssVar('--land'), landLine: cssVar('--land-line'),
+    visited: cssVar('--visited'), visitedLine: cssVar('--visited-line'),
+    stopover: cssVar('--stopover'), stopoverLine: cssVar('--stopover-line'),
+    route: cssVar('--route'), routeOn: cssVar('--route-on'),
+    marker: cssVar('--marker'), markerLine: cssVar('--marker-line'), markerOn: cssVar('--marker-on')
+  };
 }
 
 function initMap() {
-  leafletMap = L.map('map', { center: [45, 10], zoom: 3, minZoom: 1, maxZoom: 8, zoomSnap: 0.25, worldCopyJump: false });
-  leafletMap.attributionControl.setPrefix('<a href="https://leafletjs.com" target="_blank" rel="noopener">Leaflet</a>');
-  leafletMap.attributionControl.addAttribution('Fond : <a href="https://www.naturalearthdata.com" target="_blank" rel="noopener">Natural Earth</a>');
-
-  countryLayers = {};
-  if (typeof WORLD !== 'undefined') {
-    const renderer = L.canvas({ padding: 0.5 });
-    const style = { renderer, interactive: false, weight: 0.6, color: cssVar('--land-line'), fillColor: cssVar('--land'), fillOpacity: 1 };
-    WORLD.countries.forEach(c => {
-      const poly = L.polygon(decodeRings(c.r), style).addTo(leafletMap);
-      if (c.c) (countryLayers[c.c] = countryLayers[c.c] || []).push(poly);
+  if (typeof maplibregl === 'undefined') return false;
+  const p = mapPaint();
+  try {
+    mapgl = new maplibregl.Map({
+      container: 'map',
+      style: {
+        version: 8,
+        projection: { type: 'globe' },
+        sources: {
+          countries: { type: 'geojson', data: worldGeoJSON({}) },
+          routes: { type: 'geojson', data: { type: 'FeatureCollection', features: [] }, promoteId: 'key' },
+          airports: { type: 'geojson', data: { type: 'FeatureCollection', features: [] }, promoteId: 'code' }
+        },
+        layers: [
+          { id: 'ocean', type: 'background', paint: { 'background-color': p.ocean } },
+          { id: 'countries-fill', type: 'fill', source: 'countries', paint: { 'fill-color': p.land } },
+          { id: 'countries-line', type: 'line', source: 'countries', filter: ['!=', ['get', 'status'], 'stopover'], paint: { 'line-color': p.landLine, 'line-width': 0.6 } },
+          { id: 'stopover-line', type: 'line', source: 'countries', filter: ['==', ['get', 'status'], 'stopover'], paint: { 'line-color': p.stopoverLine, 'line-width': 1, 'line-dasharray': [2, 2] } },
+          { id: 'routes', type: 'line', source: 'routes', layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': p.route, 'line-width': ['interpolate', ['linear'], ['zoom'], 0.5, ['*', 0.55, ['min', 6, ['+', 1.5, ['*', 0.5, ['get', 'n']]]]], 3.5, ['min', 6, ['+', 1.5, ['*', 0.5, ['get', 'n']]]]], 'line-opacity': 0.8 } },
+          { id: 'routes-hit', type: 'line', source: 'routes', paint: { 'line-color': '#000', 'line-width': 14, 'line-opacity': 0 } },
+          { id: 'airports', type: 'circle', source: 'airports', paint: { 'circle-color': p.marker, 'circle-stroke-color': p.markerLine, 'circle-stroke-width': ['interpolate', ['linear'], ['zoom'], 0.5, 1.5, 3.5, 2.5], 'circle-radius': ['interpolate', ['linear'], ['zoom'], 0.5, ['*', 0.5, ['min', 15, ['+', 5, ['*', 1.6, ['sqrt', ['get', 'n']]]]]], 3.5, ['min', 15, ['+', 5, ['*', 1.6, ['sqrt', ['get', 'n']]]]]] } }
+        ]
+      },
+      center: [15, 45], zoom: 2.5, minZoom: 0.6, maxZoom: 9,
+      dragRotate: false, pitchWithRotate: false, touchPitch: false, maxPitch: 0,
+      renderWorldCopies: true,
+      cooperativeGestures: coarsePointer(),   // on a phone: one finger scrolls the page, two fingers move the map
+      attributionControl: { compact: true, customAttribution: 'Fond : <a href="https://www.naturalearthdata.com" target="_blank" rel="noopener">Natural Earth</a>' },
+      locale: {
+        'NavigationControl.ZoomIn': 'Zoom avant', 'NavigationControl.ZoomOut': 'Zoom arrière',
+        'GlobeControl.Enable': 'Voir le globe', 'GlobeControl.Disable': 'Voir la carte à plat',
+        'CooperativeGesturesHandler.MobileHelpText': 'Utilisez deux doigts pour déplacer la carte',
+        'CooperativeGesturesHandler.WindowsHelpText': 'Ctrl + molette pour zoomer',
+        'CooperativeGesturesHandler.MacHelpText': '⌘ + molette pour zoomer',
+        'AttributionControl.ToggleAttribution': 'Sources'
+      }
     });
+  } catch (e) {
+    mapgl = null;
+    return false;
   }
-
-  // "Show all" button under the zoom buttons
-  const Fit = L.Control.extend({
-    options: { position: 'topleft' },
+  mapgl.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-left');
+  mapgl.addControl(new maplibregl.GlobeControl(), 'top-left');
+  mapgl.addControl({
     onAdd() {
-      const box = L.DomUtil.create('div', 'leaflet-bar');
-      const a = L.DomUtil.create('a', 'map-fit', box);
-      a.href = '#'; a.title = 'Voir tous les vols'; a.setAttribute('aria-label', 'Voir tous les vols'); a.textContent = '⤢';
-      L.DomEvent.on(a, 'click', e => { L.DomEvent.preventDefault(e); fitMap(true); });
-      L.DomEvent.disableClickPropagation(box);
+      const box = document.createElement('div');
+      box.className = 'maplibregl-ctrl maplibregl-ctrl-group';
+      box.innerHTML = '<button type="button" class="map-fit" title="Voir tous les vols" aria-label="Voir tous les vols">⤢</button>';
+      box.querySelector('button').onclick = () => fitMap(true);
       return box;
-    }
+    },
+    onRemove() {}
+  }, 'top-left');
+
+
+  hoverPopup = new maplibregl.Popup({ closeButton: false, closeOnClick: false, className: 'map-tip', offset: 10 });
+  const hover = (layer, html) => {
+    mapgl.on('mousemove', layer, e => {
+      mapgl.getCanvas().style.cursor = 'pointer';
+      if (!coarsePointer()) hoverPopup.setLngLat(e.lngLat).setHTML(html(e.features[0].properties)).addTo(mapgl);
+    });
+    mapgl.on('mouseleave', layer, () => { mapgl.getCanvas().style.cursor = ''; hoverPopup.remove(); });
+  };
+  hover('airports', p => `<b>${esc(p.code)}</b> ${esc(city(p.code))}`);
+  hover('routes-hit', p => `${esc(p.a)} ↔ ${esc(p.b)} · ${plural(p.n, 'vol', 'vols')}`);
+
+  // One click handler: the airport wins over the route under it, empty sea or land closes the panel
+  mapgl.on('click', e => {
+    const hit = mapgl.queryRenderedFeatures(e.point, { layers: ['airports', 'routes-hit'] });
+    const ap = hit.find(f => f.layer.id === 'airports'), rt = hit.find(f => f.layer.id === 'routes-hit');
+    hoverPopup.remove();
+    if (ap) showAirportPanel(ap.properties.code);
+    else if (rt) showRoutePanel(rt.properties.key);
+    else closeMapPanel();
   });
-  new Fit().addTo(leafletMap);
-  leafletMap.on('click', closeMapPanel);
+
+  // The style is inline, so "load" can come very early: also accept "styledata" and "idle"
+  const ready = () => {
+    if (mapReady || !mapgl.isStyleLoaded()) return;
+    mapReady = true;
+    const q = mapReadyQueue; mapReadyQueue = [];
+    q.forEach(fn => fn());
+  };
+  ['load', 'styledata', 'idle'].forEach(ev => mapgl.on(ev, ready));
+  // Events can be missed when the page is in the background: check a few times as well
+  let tries = 0;
+  const poll = setInterval(() => { ready(); if (mapReady || ++tries > 100) clearInterval(poll); }, 100);
+  return true;
+}
+function whenMapReady(fn) {
+  if (mapReady || (mapgl && mapgl.isStyleLoaded())) { mapReady = true; fn(); }
+  else mapReadyQueue.push(fn);
 }
 
 function usedAirports() {
@@ -996,97 +1086,97 @@ function usedAirports() {
 }
 
 function fitMap(force) {
+  if (!mapgl) return;
   const codes = usedAirports();
-  const key = codes.sort().join(',');
+  const key = [...codes].sort().join(',');
   if (!force && key === fittedFor) return;
   fittedFor = key;
-  if (!codes.length) { leafletMap.setView([45, 10], 3); return; }
-  if (codes.length === 1) { const a = AIRPORTS[codes[0]]; leafletMap.setView([a.lat, a.lon], 5); return; }
+  if (!codes.length) { mapgl.jumpTo({ center: [15, 45], zoom: 2.5 }); return; }
+  if (codes.length === 1) { const a = AIRPORTS[codes[0]]; mapgl.easeTo({ center: [a.lon, a.lat], zoom: 5 }); return; }
+  const lons = codes.map(c => AIRPORTS[c].lon), lats = codes.map(c => AIRPORTS[c].lat);
   const wide = window.innerWidth > 768 && !$('map-panel').hidden;
-  leafletMap.fitBounds(L.latLngBounds(codes.map(c => [AIRPORTS[c].lat, AIRPORTS[c].lon])), {
-    paddingTopLeft: [40, 40], paddingBottomRight: [wide ? 360 : 40, 40], maxZoom: 6
+  mapgl.fitBounds([[Math.min(...lons), Math.min(...lats)], [Math.max(...lons), Math.max(...lats)]], {
+    padding: window.innerWidth <= 560 ? 24 : { top: 50, left: 50, bottom: 50, right: wide ? 380 : 50 }, maxZoom: 5, duration: force ? 800 : 0
   });
 }
 
 function renderMap() {
-  if (typeof L === 'undefined') { $('map').innerHTML = '<div class="empty-state"><p>La carte ne se charge pas. Vérifiez la connexion internet.</p></div>'; return; }
-  if (!leafletMap) initMap();
-  Object.values(routeLayers).forEach(l => l.remove());
-  Object.values(markerLayers).forEach(l => l.remove());
-  routeLayers = {}; markerLayers = {};
-
-  // Countries coloured with the passport rules: visited, stopover only, or neither
-  const info = countryInfo();
-  const visited = new Set(info.visited.map(r => r.cc)), stopover = new Set(info.stopover.map(r => r.cc));
-  const look = {
-    visited: { fillColor: cssVar('--visited'), color: cssVar('--visited-line'), dashArray: null, weight: 0.8 },
-    stopover: { fillColor: cssVar('--stopover'), color: cssVar('--stopover-line'), dashArray: '3 3', weight: 0.8 },
-    other: { fillColor: cssVar('--land'), color: cssVar('--land-line'), dashArray: null, weight: 0.6 }
-  };
-  for (const [cc, polys] of Object.entries(countryLayers)) {
-    const st = visited.has(cc) ? look.visited : stopover.has(cc) ? look.stopover : look.other;
-    polys.forEach(p => p.setStyle(st));
+  if (!mapgl && !initMap()) {
+    $('map').innerHTML = '<div class="empty-state"><p>La carte ne peut pas s\'afficher sur cet appareil (WebGL indisponible ou pas de connexion internet).</p></div>';
+    return;
   }
+  mapgl.resize();
+  whenMapReady(() => {
+    const p = mapPaint();
+    // Colors follow the theme
+    mapgl.setPaintProperty('ocean', 'background-color', p.ocean);
+    mapgl.setPaintProperty('countries-fill', 'fill-color', ['match', ['get', 'status'], 'visited', p.visited, 'stopover', p.stopover, p.land]);
+    mapgl.setPaintProperty('countries-line', 'line-color', ['match', ['get', 'status'], 'visited', p.visitedLine, p.landLine]);
+    mapgl.setPaintProperty('stopover-line', 'line-color', p.stopoverLine);
+    mapgl.setPaintProperty('airports', 'circle-color', ['case', ['boolean', ['feature-state', 'main'], false], p.markerOn, p.marker]);
+    mapgl.setPaintProperty('airports', 'circle-stroke-color', p.markerLine);
+    mapgl.setPaintProperty('airports', 'circle-opacity', ['case', ['boolean', ['feature-state', 'dim'], false], 0.3, 1]);
+    mapgl.setPaintProperty('airports', 'circle-stroke-opacity', ['case', ['boolean', ['feature-state', 'dim'], false], 0.3, 1]);
+    mapgl.setPaintProperty('routes', 'line-color', ['case', ['boolean', ['feature-state', 'on'], false], p.routeOn, p.route]);
+    mapgl.setPaintProperty('routes', 'line-opacity', ['case', ['boolean', ['feature-state', 'dim'], false], 0.12, ['boolean', ['feature-state', 'on'], false], 1, 0.8]);
 
-  // One line per pair of airports, both directions together
-  const routes = {};
-  flights.forEach(f => {
-    if (!AIRPORTS[f.from] || !AIRPORTS[f.to]) return;
-    const k = routeKey(f.from, f.to);
-    (routes[k] = routes[k] || { a: f.from, b: f.to, n: 0 }).n++;
-  });
-  for (const [k, r] of Object.entries(routes)) {
-    const A = AIRPORTS[r.a], B = AIRPORTS[r.b];
-    const line = L.polyline(greatCirclePoints(A.lat, A.lon, B.lat, B.lon), {
-      color: cssVar('--route'), weight: Math.min(1.5 + r.n * 0.5, 6), opacity: 0.75, lineCap: 'round'
+    // Countries with the passport rules
+    const info = countryInfo(), status = {};
+    info.visited.forEach(r => { status[r.cc] = 'visited'; });
+    info.stopover.forEach(r => { status[r.cc] = 'stopover'; });
+    mapgl.getSource('countries').setData(worldGeoJSON(status));
+
+    // One line per pair of airports, both directions together
+    const routes = {};
+    flights.forEach(f => {
+      if (!AIRPORTS[f.from] || !AIRPORTS[f.to]) return;
+      const k = routeKey(f.from, f.to);
+      (routes[k] = routes[k] || { a: f.from, b: f.to, n: 0 }).n++;
     });
-    line.bindTooltip(`${r.a} ↔ ${r.b} · ${plural(r.n, 'vol', 'vols')}`, { sticky: true, className: 'map-tip' });
-    line.on('click', e => { L.DomEvent.stopPropagation(e); showRoutePanel(k); });
-    line.addTo(leafletMap);
-    routeLayers[k] = line;
-  }
-
-  // Airports, the busiest drawn last so they stay clickable on top
-  const counts = {};
-  flights.forEach(f => { counts[f.from] = (counts[f.from] || 0) + 1; counts[f.to] = (counts[f.to] || 0) + 1; });
-  usedAirports().sort((a, b) => counts[a] - counts[b]).forEach(code => {
-    const ap = AIRPORTS[code];
-    const m = L.circleMarker([ap.lat, ap.lon], {
-      radius: Math.min(5 + Math.sqrt(counts[code]) * 1.6, 15),
-      fillColor: cssVar('--marker'), color: cssVar('--marker-line'), weight: 2.5, opacity: 1, fillOpacity: 1
+    routeKeys = new Set(Object.keys(routes));
+    mapgl.getSource('routes').setData({
+      type: 'FeatureCollection',
+      features: Object.entries(routes).map(([k, r]) => {
+        const A = AIRPORTS[r.a], B = AIRPORTS[r.b];
+        return { type: 'Feature', properties: { key: k, a: r.a, b: r.b, n: r.n },
+          geometry: { type: 'LineString', coordinates: greatCirclePoints(A.lat, A.lon, B.lat, B.lon, 64).map(([la, lo]) => [lo, la]) } };
+      })
     });
-    m.bindTooltip(`<b>${esc(code)}</b> ${esc(ap.city)}`, { direction: 'top', offset: [0, -6], className: 'map-tip' });
-    m.on('click', e => { L.DomEvent.stopPropagation(e); showAirportPanel(code); });
-    m.addTo(leafletMap);
-    markerLayers[code] = m;
-  });
 
-  setTimeout(() => {
-    leafletMap.invalidateSize();
+    const counts = {};
+    flights.forEach(f => { counts[f.from] = (counts[f.from] || 0) + 1; counts[f.to] = (counts[f.to] || 0) + 1; });
+    airportCodes = new Set(usedAirports());
+    mapgl.getSource('airports').setData({
+      type: 'FeatureCollection',
+      features: [...airportCodes].sort((a, b) => counts[a] - counts[b]).map(code => ({
+        type: 'Feature', properties: { code, n: counts[code] },
+        geometry: { type: 'Point', coordinates: [AIRPORTS[code].lon, AIRPORTS[code].lat] }
+      }))
+    });
+
     fitMap(false);
     if (mapSelection) reopenMapPanel(); else applyHighlight();
-  }, 60);
+  });
 }
 
 // Dims everything not linked to the selected airport or route
 function applyHighlight() {
+  if (!mapgl || !mapReady) return;
   const sel = mapSelection;
-  for (const [k, line] of Object.entries(routeLayers)) {
-    const on = !sel || (sel.type === 'airport' ? k.split('-').includes(sel.code) : k === sel.key);
-    line.setStyle({ opacity: on ? (sel ? 1 : 0.75) : 0.12, color: cssVar(on && sel ? '--route-on' : '--route') });
-    if (on && sel) line.bringToFront();
-  }
   const linked = new Set();
   if (sel?.type === 'airport') {
     linked.add(sel.code);
-    Object.keys(routeLayers).forEach(k => { const [a, b] = k.split('-'); if (a === sel.code) linked.add(b); if (b === sel.code) linked.add(a); });
+    routeKeys.forEach(k => { const [a, b] = k.split('-'); if (a === sel.code) linked.add(b); if (b === sel.code) linked.add(a); });
   } else if (sel?.type === 'route') sel.key.split('-').forEach(c => linked.add(c));
-  for (const [code, m] of Object.entries(markerLayers)) {
+  routeKeys.forEach(k => {
+    const on = !!sel && (sel.type === 'airport' ? k.split('-').includes(sel.code) : k === sel.key);
+    mapgl.setFeatureState({ source: 'routes', id: k }, { on, dim: !!sel && !on });
+  });
+  airportCodes.forEach(code => {
     const on = !sel || linked.has(code);
-    const main = sel && (sel.type === 'airport' ? code === sel.code : linked.has(code));
-    m.setStyle({ fillOpacity: on ? 1 : 0.25, opacity: on ? 1 : 0.25, fillColor: cssVar(main ? '--marker-on' : '--marker') });
-    if (on) m.bringToFront();
-  }
+    const main = !!sel && (sel.type === 'airport' ? code === sel.code : linked.has(code));
+    mapgl.setFeatureState({ source: 'airports', id: code }, { dim: !on, main });
+  });
 }
 
 // ─── Side panel (bottom sheet on a phone) ───
@@ -1126,8 +1216,8 @@ function closeMapPanel() {
 }
 function reopenMapPanel() {
   const s = mapSelection;
-  if (s.type === 'airport' && markerLayers[s.code]) showAirportPanel(s.code);
-  else if (s.type === 'route' && routeLayers[s.key]) showRoutePanel(s.key);
+  if (s.type === 'airport' && airportCodes.has(s.code)) showAirportPanel(s.code);
+  else if (s.type === 'route' && routeKeys.has(s.key)) showRoutePanel(s.key);
   else closeMapPanel();
 }
 
