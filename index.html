@@ -4,6 +4,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="robots" content="noindex, nofollow">
+  <!-- Version du site : la changer ici ET dans version.txt a chaque mise a jour -->
+  <meta name="app-version" content="2026-11-12.2">
   <title>SkyLog · Carnet de vol</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9C%88%EF%B8%8F%3C/text%3E%3C/svg%3E">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
@@ -518,8 +520,28 @@
 
 <div id="toast"></div>
 
-<script src="airports.js"></script>
-<script src="world.js"></script>
-<script src="app.js"></script>
+<script>
+// Loads the site files with the version number, so a browser never mixes old and new files.
+// If version.txt (never cached) names a newer version, the page refreshes itself once.
+(function () {
+  var v = document.querySelector('meta[name="app-version"]').content;
+  ['airports.js', 'world.js', 'app.js'].forEach(function (f) {
+    var s = document.createElement('script');
+    s.src = f + '?v=' + encodeURIComponent(v);
+    s.async = false;
+    document.body.appendChild(s);
+  });
+  fetch('version.txt', { cache: 'no-store' })
+    .then(function (r) { return r.ok ? r.text() : ''; })
+    .then(function (t) {
+      t = (t || '').trim();
+      if (!t || t === v) return;
+      var key = 'carnet_reload_' + t;
+      try { if (sessionStorage.getItem(key)) return; sessionStorage.setItem(key, '1'); } catch (e) { return; }
+      fetch(location.pathname, { cache: 'reload' }).catch(function () {}).then(function () { location.reload(); });
+    })
+    .catch(function () {});
+})();
+</script>
 </body>
 </html>
