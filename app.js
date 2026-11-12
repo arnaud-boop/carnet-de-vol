@@ -443,11 +443,9 @@ function pickImport() { $('import-file').click(); }
 // ═══════════════════════════════════════
 let leafletMap = null, mapLayers = [], charts = [];
 
-function showView(name, btn) {
-  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
-  document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
-  $('view-' + name).classList.add('active');
-  if (btn) btn.classList.add('active');
+function showView(name) {
+  document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.id === 'view-' + name));
+  document.querySelectorAll('.nav-tab').forEach(t => t.classList.toggle('active', t.dataset.view === name));
   renderAll();
 }
 function renderAll() {
@@ -455,6 +453,7 @@ function renderAll() {
   const active = document.querySelector('.view.active')?.id;
   if (active === 'view-dashboard') renderDashboard();
   else if (active === 'view-flights') renderFlightsTable();
+  else if (active === 'view-journal') renderJournal();
   else if (active === 'view-analytics') renderAnalytics();
 }
 const city = code => AIRPORTS[code]?.city || code || '';
@@ -474,7 +473,7 @@ function renderDashboard() {
   const nYear = flights.filter(f => f.date.startsWith(thisYear)).length;
 
   $('stats-grid').innerHTML = `
-    <div class="stat-card" onclick="showView('flights',document.querySelectorAll('.nav-tab')[1])" title="Voir tous les vols">
+    <div class="stat-card" onclick="showView('flights')" title="Voir tous les vols">
       <div class="stat-icon">✈️</div>
       <div class="stat-label">Vols</div>
       <div class="stat-value">${total}</div>
@@ -1044,6 +1043,109 @@ function showRoutePanel(key) {
     ${airlines.length ? `<div class="mp-note">${esc(airlines.join(', '))}</div>` : ''}
     <div class="mp-label">Vols</div>
     ${flightRows(list)}`, { type: 'route', key });
+}
+
+// ═══════════════════════════════════════
+//  JOURNAL
+// ═══════════════════════════════════════
+// Flights are grouped into trips: a trip starts when leaving home (the most
+// used airport) and ends when coming back. A stop left the same day it was
+// reached is a connection ("via"), not a destination.
+function daysBetween(a, b) { return Math.round((new Date(b + 'T12:00:00Z') - new Date(a + 'T12:00:00Z')) / 86400000); }
+function arrivalDay(f) { return f.arrivalDate || f.date; }
+
+function buildTrips() {
+  const counts = {};
+  flights.forEach(f => [f.from, f.to].forEach(c => { counts[c] = (counts[c] || 0) + 1; }));
+  const home = Object.keys(counts).sort((a, b) => counts[b] - counts[a])[0];
+  const sorted = [...flights].sort((a, b) => (a.date + a.departureTime).localeCompare(b.date + b.departureTime));
+  const trips = [];
+  let cur = null;
+  sorted.forEach(f => {
+    const last = cur && cur[cur.length - 1];
+    if (!last || last.to === home || f.from === home || daysBetween(arrivalDay(last), f.date) > 45) { cur = []; trips.push(cur); }
+    cur.push(f);
+  });
+  return trips.map(list => {
+    const places = [], via = [], stops = [];
+    list.forEach((f, i) => {
+      if (f.to === home) return;
+      const next = list[i + 1];
+      const transit = next && next.from === f.to && next.date === arrivalDay(f);
+      const name = city(f.to);
+      if (transit) { if (!via.includes(name)) via.push(name); }
+      else if (!places.includes(name)) { places.push(name); stops.push(f.to); }
+    });
+    if (!places.length) list.forEach(f => { if (f.from !== home && !places.includes(city(f.from))) { places.push(city(f.from)); stops.push(f.from); } });
+    const finalVia = via.filter(v => !places.includes(v));
+    const countries = [...new Set(stops.map(c => AIRPORTS[c]?.country).filter(Boolean))];
+    const people = [...new Set(list.flatMap(f => (f.coTravelers || '').split(',').map(p => p.trim()).filter(Boolean)))];
+    return {
+      flights: list, places, via: finalVia, countries, people,
+      start: list[0].date, end: arrivalDay(list[list.length - 1]),
+      km: list.reduce((s, f) => s + (f.distKm || 0), 0)
+    };
+  });
+}
+
+let journalObserver = null;
+
+function renderJournal() {
+  const el = $('journal');
+  if (journalObserver) { journalObserver.disconnect(); journalObserver = null; }
+  if (!flights.length) {
+    el.innerHTML = '<div class="empty-state"><div class="emoji">📔</div><p>Aucun vol pour l\'instant.</p><button class="btn btn-primary" onclick="openModal()">+ Ajouter le premier vol</button></div>';
+    return;
+  }
+  const trips = buildTrips().reverse();   // most recent trip first; flights inside a trip stay in order
+  const byYear = {};
+  trips.forEach(t => { (byYear[t.start.slice(0, 4)] = byYear[t.start.slice(0, 4)] || []).push(t); });
+
+  el.innerHTML = Object.keys(byYear).sort().reverse().map(year => {
+    const list = byYear[year];
+    const n = list.reduce((s, t) => s + t.flights.length, 0);
+    const km = list.reduce((s, t) => s + t.km, 0);
+    return `<div class="j-year"><h2>${esc(year)}</h2><span>${plural(list.length, 'voyage', 'voyages')} · ${plural(n, 'vol', 'vols')} · ${fmtInt(km)} km</span></div>
+      ${list.map(t => {
+        const days = daysBetween(t.start, t.end) + 1;
+        const dates = t.start === t.end ? formatDate(t.start) : `du ${formatDate(t.start)} au ${formatDate(t.end)} · ${days} jours`;
+        return `<article class="j-trip">
+          <div class="j-trip-head">
+            <div class="j-trip-title"><span class="j-trip-flags">${t.countries.map(countryFlag).join(' ')}</span>${esc(t.places.join(' · '))}</div>
+            <div class="j-trip-sub">${dates}${t.via.length ? ` · via ${esc(t.via.join(', '))}` : ''}${t.people.length ? `<br>avec ${esc(t.people.join(', '))}` : ''}</div>
+          </div>
+          <ol class="j-flights">${t.flights.map(f => {
+            const meta = [[f.airline, f.flightNumber].filter(Boolean).join(' '), f.aircraftType, f.seat ? 'siège ' + f.seat : '', fmtDur(f.durationMin)].filter(Boolean);
+            return `<li class="j-flight" data-flight="${esc(f.id)}" tabindex="0" role="button" aria-label="Voir le vol ${esc(f.from)} vers ${esc(f.to)} du ${formatDate(f.date)}">
+              <div class="j-line">
+                <span class="j-date">${formatDate(f.date)}</span>
+                <span class="j-route">${esc(f.from)} → ${esc(f.to)}</span>
+                <span class="j-cities">${esc(city(f.from))} → ${esc(city(f.to))}</span>
+              </div>
+              <div class="j-meta">${esc(meta.join(' · '))}</div>
+              ${f.notes ? `<p class="j-notes">${esc(f.notes)}</p>` : ''}
+              ${f.photo ? `<div class="j-photo" data-photo="${esc(f.photo)}"></div>` : ''}
+            </li>`;
+          }).join('')}</ol>
+        </article>`;
+      }).join('')}`;
+  }).join('');
+
+  // Photos are downloaded only when they come into view
+  const load = box => {
+    photoURL(box.dataset.photo).then(url => {
+      const img = new Image();
+      img.alt = 'Photo du vol'; img.loading = 'lazy'; img.src = url;
+      box.replaceChildren(img);
+    }).catch(() => { box.innerHTML = '<div class="j-empty-photo">Photo indisponible</div>'; });
+  };
+  const boxes = el.querySelectorAll('.j-photo');
+  if ('IntersectionObserver' in window) {
+    journalObserver = new IntersectionObserver(entries => entries.forEach(e => {
+      if (e.isIntersecting) { journalObserver.unobserve(e.target); load(e.target); }
+    }), { rootMargin: '400px' });
+    boxes.forEach(b => journalObserver.observe(b));
+  } else boxes.forEach(load);
 }
 
 // ═══════════════════════════════════════
@@ -1856,6 +1958,14 @@ document.addEventListener('keydown', e => {
   if (e.key !== 'Escape') return;
   const open = document.querySelectorAll('.modal-overlay.open');
   if (open.length) open.forEach(m => closeModal(m.id)); else closeMapPanel();
+});
+$('journal').addEventListener('click', e => {
+  const item = e.target.closest('.j-flight');
+  if (item) openFlightDetail(item.dataset.flight);
+});
+$('journal').addEventListener('keydown', e => {
+  const item = e.target.closest('.j-flight');
+  if (item && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); openFlightDetail(item.dataset.flight); }
 });
 $('map-panel').addEventListener('click', e => {
   const t = e.target.closest('[data-flight],[data-route],[data-airport],.mp-close');

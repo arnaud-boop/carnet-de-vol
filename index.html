@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="robots" content="noindex, nofollow">
   <!-- Version du site : la changer ici ET dans version.txt a chaque mise a jour -->
-  <meta name="app-version" content="2026-11-12.4">
+  <meta name="app-version" content="2026-11-12.5">
   <title>SkyLog · Carnet de vol</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9C%88%EF%B8%8F%3C/text%3E%3C/svg%3E">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
@@ -162,6 +162,31 @@
     .mp-here{color:var(--accent2);}
     .mp-meta{font-size:11px;color:var(--text3);grid-column:2;}
 
+    /* Journal */
+    .journal{max-width:760px;margin:0 auto;}
+    .j-year{display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap;margin:28px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border);}
+    .j-year:first-child{margin-top:0;}
+    .j-year h2{font-size:28px;font-weight:700;letter-spacing:-1px;}
+    .j-year span{font-size:12px;color:var(--text3);}
+    .j-trip{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:18px 20px;margin-bottom:16px;}
+    .j-trip-head{margin-bottom:12px;}
+    .j-trip-title{font-size:18px;font-weight:700;line-height:1.3;}
+    .j-trip-flags{margin-right:6px;}
+    .j-trip-sub{font-size:12px;color:var(--text3);margin-top:3px;line-height:1.5;}
+    .j-flights{list-style:none;border-left:2px solid var(--border);margin-left:6px;padding-left:18px;display:flex;flex-direction:column;gap:14px;}
+    .j-flight{position:relative;cursor:pointer;border-radius:8px;}
+    .j-flight::before{content:"";position:absolute;left:-25px;top:6px;width:12px;height:12px;border-radius:50%;background:var(--card);border:2px solid var(--accent2);}
+    .j-flight:hover .j-route{color:var(--accent2);}
+    .j-line{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;}
+    .j-date{font-size:12px;color:var(--text3);font-variant-numeric:tabular-nums;}
+    .j-route{font-size:15px;font-weight:600;transition:color .15s;}
+    .j-cities{font-size:12px;color:var(--text2);}
+    .j-meta{font-size:12px;color:var(--text3);margin-top:2px;}
+    .j-notes{font-size:14px;color:var(--text);line-height:1.6;margin-top:8px;white-space:pre-wrap;overflow-wrap:anywhere;}
+    .j-photo{margin-top:10px;border-radius:10px;overflow:hidden;background:var(--bg3);min-height:120px;max-width:480px;}
+    .j-photo img{display:block;width:100%;max-height:360px;object-fit:cover;}
+    .j-empty-photo{font-size:12px;color:var(--text3);padding:12px;}
+
     /* Charts */
     .charts-grid{display:grid;grid-template-columns:1fr 1fr;gap:20px;}
     .chart-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:20px;min-width:0;}
@@ -248,6 +273,8 @@
 
     /* Responsive */
     @media(max-width:768px){
+      .j-trip{padding:14px 14px;}
+      .j-year h2{font-size:24px;}
       header{padding:0 14px;}
       nav{padding:0 8px;}
       #banner{padding:10px 14px;}
@@ -338,9 +365,10 @@
 
 <div id="app" hidden>
 <nav>
-  <button class="nav-tab active" onclick="showView('dashboard',this)">Tableau de bord</button>
-  <button class="nav-tab" onclick="showView('flights',this)">Mes vols</button>
-  <button class="nav-tab" onclick="showView('analytics',this)">Statistiques</button>
+  <button class="nav-tab active" data-view="dashboard" onclick="showView('dashboard')">Tableau de bord</button>
+  <button class="nav-tab" data-view="journal" onclick="showView('journal')">Journal</button>
+  <button class="nav-tab" data-view="flights" onclick="showView('flights')">Mes vols</button>
+  <button class="nav-tab" data-view="analytics" onclick="showView('analytics')">Statistiques</button>
 </nav>
 
 <main>
@@ -370,6 +398,10 @@
       </select>
     </div>
     <div class="table-wrap" id="flights-table"></div>
+  </div>
+
+  <div class="view" id="view-journal">
+    <div class="journal" id="journal"></div>
   </div>
 
   <div class="view" id="view-analytics">
