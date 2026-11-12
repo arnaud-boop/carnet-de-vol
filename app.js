@@ -1103,8 +1103,10 @@ function whenMapReady(fn) {
   else mapReadyQueue.push(fn);
 }
 
+let mapYear = '';   // '' = every year
+function mapFlights() { return mapYear ? flights.filter(f => f.date.startsWith(mapYear)) : flights; }
 function usedAirports() {
-  return [...new Set(flights.flatMap(f => [f.from, f.to]))].filter(c => AIRPORTS[c]);
+  return [...new Set(mapFlights().flatMap(f => [f.from, f.to]))].filter(c => AIRPORTS[c]);
 }
 
 function fitMap(force) {
@@ -1123,6 +1125,7 @@ function fitMap(force) {
 }
 
 function renderMap() {
+  renderMapHeader();
   if (!mapgl && !initMap()) {
     $('map').innerHTML = '<div class="empty-state"><p>La carte ne peut pas s\'afficher sur cet appareil (WebGL indisponible ou pas de connexion internet).</p></div>';
     return;
@@ -1150,7 +1153,7 @@ function renderMap() {
 
     // One line per pair of airports, both directions together
     const routes = {};
-    flights.forEach(f => {
+    mapFlights().forEach(f => {
       if (!AIRPORTS[f.from] || !AIRPORTS[f.to]) return;
       const k = routeKey(f.from, f.to);
       (routes[k] = routes[k] || { a: f.from, b: f.to, n: 0 }).n++;
@@ -1166,7 +1169,7 @@ function renderMap() {
     });
 
     const counts = {};
-    flights.forEach(f => { counts[f.from] = (counts[f.from] || 0) + 1; counts[f.to] = (counts[f.to] || 0) + 1; });
+    mapFlights().forEach(f => { counts[f.from] = (counts[f.from] || 0) + 1; counts[f.to] = (counts[f.to] || 0) + 1; });
     airportCodes = new Set(usedAirports());
     mapgl.getSource('airports').setData({
       type: 'FeatureCollection',
@@ -1179,6 +1182,44 @@ function renderMap() {
     fitMap(false);
     if (mapSelection) reopenMapPanel(); else applyHighlight();
   });
+}
+
+// ─── Map tab: header, year filter and the four extreme airports ───
+const EXT_LABEL = { n: 'Le plus au nord', s: 'Le plus au sud', e: 'Le plus à l\'est', w: 'Le plus à l\'ouest' };
+function renderMapHeader() {
+  const aps = usedAirports();
+  const routes = new Set(mapFlights().map(f => routeKey(f.from, f.to)));
+  const info = countryInfo();
+  // The country count is for the whole logbook, so it is shown only when every year is on the map
+  $('map-summary').textContent = `${plural(aps.length, 'aéroport', 'aéroports')} · ${plural(routes.size, 'trajet', 'trajets')}${mapYear ? ' en ' + mapYear : ' · ' + plural(info.visited.length, 'pays visité', 'pays visités')}`;
+  const years = [...new Set(flights.map(f => f.date.slice(0, 4)))].sort().reverse();
+  if (mapYear && !years.includes(mapYear)) mapYear = '';
+  $('map-years').innerHTML = ['', ...years].map(y => `<button type="button" class="pill${y === mapYear ? ' on' : ''}" data-map-year="${esc(y)}" aria-pressed="${y === mapYear}">${y ? esc(y) : 'Toutes les années'}</button>`).join('');
+
+  // Farthest north, south, east and west among the airports on the map
+  const pick = better => aps.reduce((best, c) => (!best || better(AIRPORTS[c], AIRPORTS[best])) ? c : best, null);
+  const lat = a => `${Math.abs(a.lat).toFixed(1)}° ${a.lat >= 0 ? 'N' : 'S'}`;
+  const lon = a => `${Math.abs(a.lon).toFixed(1)}° ${a.lon >= 0 ? 'E' : 'O'}`;
+  const ext = [
+    ['n', '↑', pick((a, b) => a.lat > b.lat), lat],
+    ['s', '↓', pick((a, b) => a.lat < b.lat), lat],
+    ['e', '→', pick((a, b) => a.lon > b.lon), lon],
+    ['w', '←', pick((a, b) => a.lon < b.lon), lon]
+  ];
+  $('map-extremes').innerHTML = aps.length ? ext.map(([k, arrow, code, coord]) => `<button type="button" class="ext" data-ext-airport="${esc(code)}">
+      <span class="ext-dir"><i aria-hidden="true">${arrow}</i>${EXT_LABEL[k]}</span>
+      <b>${esc(code)}</b><span class="ext-city">${esc(city(code))}, ${esc(countryName(AIRPORTS[code].country))}</span>
+      <span class="ext-coord">${coord(AIRPORTS[code])}</span>
+    </button>`).join('') : '';
+}
+
+function focusAirport(code) {
+  const ap = AIRPORTS[code];
+  if (!ap || !mapgl) return;
+  showAirportPanel(code);
+  const wide = window.innerWidth > 768;
+  whenMapReady(() => mapgl.easeTo({ center: [ap.lon, ap.lat], zoom: Math.max(mapgl.getZoom(), 4), offset: wide ? [-180, 0] : [0, -Math.round(window.innerHeight * 0.2)], duration: 900 }));   // offset: keep the airport visible beside the panel
+  if (!wide) $('map-container').scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 // Dims everything not linked to the selected airport or route
@@ -2354,6 +2395,12 @@ $('passport').addEventListener('click', e => {
 $('stat-popup-body').addEventListener('click', e => {
   const b = e.target.closest('[data-set-status]');
   if (b && $('stat-popup-body').dataset.country) setCountryStatus($('stat-popup-body').dataset.country, b.dataset.setStatus);
+});
+$('view-map').addEventListener('click', e => {
+  const y = e.target.closest('[data-map-year]');
+  if (y) { mapYear = y.dataset.mapYear; closeMapPanel(); renderMap(); return; }
+  const x = e.target.closest('[data-ext-airport]');
+  if (x) focusAirport(x.dataset.extAirport);
 });
 $('charts-container').addEventListener('click', e => {
   const b = e.target.closest('[data-year-mode]');
