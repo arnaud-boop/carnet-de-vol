@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="robots" content="noindex, nofollow">
   <!-- Version du site : la changer ici ET dans version.txt a chaque mise a jour -->
-  <meta name="app-version" content="2026-11-12.13">
+  <meta name="app-version" content="2026-11-12.14">
   <title>Carnet de vol</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9C%88%EF%B8%8F%3C/text%3E%3C/svg%3E">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/maplibre-gl/5.24.0/maplibre-gl.css">
@@ -309,20 +309,55 @@
     .pass::before{top:-10px;clip-path:inset(50% 0 0 0);}
     .pass::after{bottom:-10px;clip-path:inset(0 0 50% 0);}
 
+    /* Statistiques */
+    .stats{max-width:980px;margin:0 auto;display:flex;flex-direction:column;gap:16px;}
+    .st-head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-top:4px;}
+    .st-avg{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;}
+    .st-avg div{background:var(--passport);color:var(--gold-2);border-radius:var(--radius);padding:14px 16px;}
+    .st-avg b{display:block;font-family:var(--serif);font-size:24px;font-weight:600;color:var(--passport-hi);line-height:1.15;}
+    .st-avg span{font-size:12px;}
+    .st-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:18px 20px;min-width:0;}
+    .st-card-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:12px;}
+    .st-card-head h2{font-family:var(--serif);font-size:21px;font-weight:600;letter-spacing:-.2px;}
+    .st-card-head > span{font-size:12px;color:var(--text3);}
+    .st-chart{position:relative;height:240px;}
+    .st-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;}
+    .seg{display:inline-flex;background:var(--bg3);border-radius:999px;padding:3px;gap:2px;}
+    .seg button{border:none;background:none;border-radius:999px;padding:5px 12px;font:500 12px var(--sans);color:var(--text2);cursor:pointer;}
+    .seg button.on{background:var(--card);color:var(--text);box-shadow:0 1px 3px rgba(0,0,0,.12);}
+    .months{display:grid;grid-template-columns:repeat(12,1fr);gap:6px;height:150px;align-items:end;}
+    .month{display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%;gap:4px;}
+    .month .mb{width:100%;max-width:34px;background:var(--bg3);border-radius:6px 6px 3px 3px;}
+    .month.top .mb,.month:hover .mb{background:var(--accent);}
+    .month .mb{background:color-mix(in srgb,var(--accent) 45%,var(--bg3));}
+    .month.top .mb{background:var(--accent);}
+    .month .mv{font:500 11px var(--mono);color:var(--text2);min-height:14px;}
+    .month .ml{font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:.03em;}
+    .rk-code{font:500 13px var(--mono);color:var(--accent2);white-space:nowrap;}
+    .rk-name{font-size:12px;color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;}
+    .rk-name.rk-main{font-size:13px;color:var(--text);flex:0 1 45%;}
+    .seat-row{display:flex;align-items:flex-end;justify-content:center;gap:10px;padding:6px 0 4px;}
+    .seat-window-frame{width:14px;height:64px;border-radius:7px;border:2px solid var(--border);background:var(--ocean);align-self:center;margin-right:4px;}
+    .seat{display:flex;flex-direction:column;align-items:center;gap:6px;}
+    .seat-shape{width:94px;height:104px;border-radius:26px 26px 12px 12px;background:var(--bg3);border:2px solid var(--border);display:flex;flex-direction:column;align-items:center;justify-content:center;position:relative;}
+    .seat-shape::after{content:"";position:absolute;left:12px;right:12px;bottom:-9px;height:16px;border-radius:6px;background:inherit;border:2px solid var(--border);border-top:none;}
+    .seat-shape b{font-family:var(--serif);font-size:30px;font-weight:600;line-height:1;}
+    .seat-shape span{font:500 12px var(--mono);color:var(--text2);margin-top:4px;}
+    .seat.best .seat-shape{background:var(--accent-bg);border-color:var(--accent);}
+    .seat.best .seat-shape::after{border-color:var(--accent);}
+    .seat.best .seat-shape b{color:var(--accent2);}
+    .seat-label{font-size:12px;color:var(--text2);margin-top:10px;}
+    .seat-aisle-gap{width:54px;align-self:stretch;border-left:2px dashed var(--border);display:flex;align-items:center;justify-content:center;}
+    .seat-aisle-gap span{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.08em;writing-mode:vertical-rl;transform:rotate(180deg);}
+    .seat-kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:18px;}
+    .seat-kpis div{background:var(--bg3);border-radius:12px;padding:10px 12px;display:flex;flex-direction:column;}
+    .seat-kpis span{font-size:11px;color:var(--text3);}
+    .seat-kpis b{font-size:20px;margin-top:2px;}
+    .seat-kpis small{font-size:11px;color:var(--text2);}
+    .mono{font-family:var(--mono);font-weight:500;}
+
     /* Seats */
-    .seat-tiles{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;}
-    .seat-tile{background:var(--bg3);border-radius:12px;padding:14px;text-align:center;}
-    .seat-icon{font-size:22px;}
-    .seat-n{font-family:var(--serif);font-size:30px;font-weight:600;letter-spacing:-1px;margin-top:4px;}
     .seat-label{font-size:12px;color:var(--text2);}
-    .seat-bar{height:6px;border-radius:3px;background:var(--card);margin:10px 0 4px;overflow:hidden;}
-    .seat-bar div{height:100%;border-radius:3px;}
-    .seat-window .seat-bar div{background:var(--accent);}
-    .seat-middle .seat-bar div{background:var(--yellow);}
-    .seat-aisle .seat-bar div{background:var(--green);}
-    .seat-pct{font-size:11px;color:var(--text3);}
-    .seat-facts{list-style:none;margin-top:14px;font-size:13px;color:var(--text2);display:flex;flex-direction:column;gap:6px;}
-    .seat-facts b{color:var(--text);}
     .seat-note{font-size:11px;color:var(--text3);margin-top:12px;line-height:1.5;}
 
     /* Charts */
@@ -461,14 +496,26 @@
       .fl-title{font-size:28px;}
       .filter-bar input[type=search]{flex-basis:100%;}
       .filter-bar select{flex:1 1 0;min-width:0;}
+      .st-avg{grid-template-columns:repeat(2,1fr);}
+      .st-avg b{font-size:20px;}
+      .st-grid{grid-template-columns:1fr;}
+      .st-card{padding:16px 14px;}
+      .st-chart{height:200px;}
+      .months{gap:3px;height:130px;}
+      .month .ml{font-size:9px;letter-spacing:0;}
+      .seat-row{gap:6px;}
+      .seat-shape{width:76px;height:88px;}
+      .seat-shape b{font-size:24px;}
+      .seat-aisle-gap{width:26px;}
+      .seat-window-frame{width:10px;}
+      .seat-kpis{grid-template-columns:1fr 1fr 1fr;gap:6px;}
+      .seat-kpis div{padding:8px;}
+      .seat-kpis b{font-size:17px;}
       .pass-route b{font-size:24px;}
       .j-year h2{font-size:34px;}
       .j-trip-title{font-size:21px;}
     }
     @media(max-width:480px){
-      .seat-tiles{gap:8px;}
-      .seat-tile{padding:10px 6px;}
-      .seat-n{font-size:24px;}
       .detail-grid{grid-template-columns:1fr;}
       .detail-route{font-size:22px;}
       .logo{font-size:19px;}
@@ -596,7 +643,7 @@
   </div>
 
   <div class="view" id="view-analytics">
-    <div class="charts-grid" id="charts-container"></div>
+    <div class="stats" id="charts-container"></div>
   </div>
 </main>
 </div>

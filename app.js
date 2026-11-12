@@ -1440,19 +1440,23 @@ function renderJournal() {
 // ═══════════════════════════════════════
 //  ANALYTICS
 // ═══════════════════════════════════════
+let yearMode = 'flights';   // what the year chart shows: flights, km or hours
+
 function renderAnalytics() {
   charts.forEach(c => c.destroy());
   charts = [];
   const container = $('charts-container');
   if (!flights.length) {
-    container.innerHTML = '<div class="empty-state" style="grid-column:1/-1"><div class="emoji">📊</div><p>Ajoutez des vols pour voir les statistiques.</p></div>';
+    container.innerHTML = '<div class="empty-state"><div class="emoji">📊</div><p>Ajoutez des vols pour voir les statistiques.</p></div>';
     return;
   }
 
-  const byYear = {}, distByYear = {}, byAirline = {}, byAirport = {}, byRoute = {}, byAircraft = {};
+  const byYear = {}, byAirline = {}, byAirport = {}, byRoute = {}, byAircraft = {}, byMonth = Array(12).fill(0);
   flights.forEach(f => {
     const y = f.date.slice(0, 4);
-    if (y) { byYear[y] = (byYear[y] || 0) + 1; distByYear[y] = (distByYear[y] || 0) + (f.distKm || 0); }
+    const Y = byYear[y] = byYear[y] || { flights: 0, km: 0, hours: 0 };
+    Y.flights++; Y.km += f.distKm || 0; Y.hours += (f.durationMin || 0) / 60;
+    byMonth[+f.date.slice(5, 7) - 1]++;
     if (f.airline) byAirline[f.airline] = (byAirline[f.airline] || 0) + 1;
     if (f.from) byAirport[f.from] = (byAirport[f.from] || 0) + 1;
     if (f.to) byAirport[f.to] = (byAirport[f.to] || 0) + 1;
@@ -1461,49 +1465,94 @@ function renderAnalytics() {
     if (ac) byAircraft[ac] = (byAircraft[ac] || 0) + 1;
   });
   const top = o => Object.entries(o).sort((a, b) => b[1] - a[1]);   // full lists; the first 8 show, the rest behind "Voir tout"
-  const years = Object.keys(byYear).sort();
+  // every year from the first flight to the last, even years without flights
+  const ys = Object.keys(byYear).map(Number);
+  const years = [];
+  for (let y = Math.min(...ys); y <= Math.max(...ys); y++) years.push(String(y));
   const topAirlines = top(byAirline), topAirports = top(byAirport), topAircraft = top(byAircraft), topRoutes = top(byRoute);
 
+  const km = flights.reduce((s, f) => s + (f.distKm || 0), 0);
+  const timed = flights.filter(f => f.durationMin > 0);
+  const avgDur = timed.length ? Math.round(timed.reduce((s, f) => s + f.durationMin, 0) / timed.length) : 0;
+  const perYear = flights.length / years.length;
+  const MONTHS = ['janv', 'févr', 'mars', 'avr', 'mai', 'juin', 'juil', 'août', 'sept', 'oct', 'nov', 'déc'];
+  const MONTHS_LONG = ['janvier', 'février', 'mars', 'avril', 'mai', 'juin', 'juillet', 'août', 'septembre', 'octobre', 'novembre', 'décembre'];
+  const maxMonth = Math.max(...byMonth), topMonth = byMonth.indexOf(maxMonth);
+  const first = flights.reduce((m, f) => f.date < m ? f.date : m, '9999');
+  const rankCard = (id, title, sub, wide) => `<section class="st-card${wide ? ' st-wide' : ''}"><div class="st-card-head"><h2>${title}</h2><span>${sub}</span></div><ol class="top-list" id="${id}"></ol></section>`;
+
   container.innerHTML = `
-    <div class="chart-card"><div class="chart-title">✈️ Vols par année</div><canvas id="chart-year"></canvas></div>
-    <div class="chart-card"><div class="chart-title">📐 Distance par année (km)</div><canvas id="chart-dist"></canvas></div>
-    <div class="chart-card"><div class="chart-title">🏢 Aéroports les plus fréquentés</div><ul class="top-list" id="top-airports"></ul></div>
-    <div class="chart-card"><div class="chart-title">🛤️ Trajets les plus fréquents</div><ul class="top-list" id="top-routes"></ul></div>
-    ${topAirlines.length ? '<div class="chart-card" style="grid-column:1/-1"><div class="chart-title">🛫 Compagnies</div><ul class="top-list" id="top-airlines"></ul></div>' : ''}
-    ${topAircraft.length ? '<div class="chart-card" style="grid-column:1/-1"><div class="chart-title">🛩 Types d\'avion</div><ul class="top-list" id="top-aircraft"></ul></div>' : ''}
-    <div class="chart-card" style="grid-column:1/-1"><div class="chart-title">💺 Places à bord</div><div id="seat-summary"></div></div>`;
+    <div class="st-head">
+      <h1 class="fl-title">Statistiques</h1>
+      <span class="muted">${plural(flights.length, 'vol', 'vols')} depuis le ${formatDate(first)}</span>
+    </div>
+
+    <div class="st-avg">
+      <div><b>${fmtInt(km / flights.length)} km</b><span>par vol en moyenne</span></div>
+      <div><b>${avgDur ? fmtDur(avgDur) : '–'}</b><span>de vol en moyenne</span></div>
+      <div><b>${perYear.toFixed(1)}</b><span>vols par an</span></div>
+      <div><b>${MONTHS_LONG[topMonth]}</b><span>mois le plus fréquent (${maxMonth} vols)</span></div>
+    </div>
+
+    <section class="st-card st-wide">
+      <div class="st-card-head">
+        <h2>Au fil des années</h2>
+        <div class="seg" role="tablist" aria-label="Valeur affichée">
+          ${[['flights', 'Vols'], ['km', 'Kilomètres'], ['hours', 'Heures']].map(([k, l]) => `<button type="button" role="tab" data-year-mode="${k}" aria-selected="${yearMode === k}" class="${yearMode === k ? 'on' : ''}">${l}</button>`).join('')}
+        </div>
+      </div>
+      <div class="st-chart"><canvas id="chart-year"></canvas></div>
+    </section>
+
+    <section class="st-card st-wide">
+      <div class="st-card-head"><h2>Mois de départ</h2><span>tous les vols, toutes années</span></div>
+      <div class="months">${byMonth.map((n, i) => `<div class="month${i === topMonth ? ' top' : ''}" title="${MONTHS_LONG[i]} : ${plural(n, 'vol', 'vols')}">
+          <span class="mv">${n || ''}</span><span class="mb" style="height:${maxMonth ? Math.max(n ? 6 : 2, Math.round(n / maxMonth * 100)) : 2}%"></span><span class="ml">${MONTHS[i]}</span></div>`).join('')}</div>
+    </section>
+
+    <div class="st-grid">
+      ${rankCard('top-airports', 'Aéroports', 'passages')}
+      ${rankCard('top-routes', 'Trajets', 'vols, aller et retour')}
+      ${topAirlines.length ? rankCard('top-airlines', 'Compagnies', 'vols') : ''}
+      ${topAircraft.length ? rankCard('top-aircraft', 'Types d\'avion', 'vols') : ''}
+    </div>
+
+    <section class="st-card st-wide"><div class="st-card-head"><h2>Places à bord</h2><span>d'après le numéro de siège</span></div><div id="seat-summary"></div></section>`;
 
   if (typeof Chart !== 'undefined') {
-    const opts = {
-      responsive: true, plugins: { legend: { display: false } },
-      scales: {
-        x: { ticks: { color: cssVar('--text3') }, grid: { color: cssVar('--border') } },
-        y: { ticks: { color: cssVar('--text3'), precision: 0 }, grid: { color: cssVar('--border') }, beginAtZero: true }
+    const val = y => Math.round((byYear[y] || {})[yearMode] || 0);
+    charts.push(new Chart($('chart-year'), {
+      type: 'bar',
+      data: { labels: years, datasets: [{ data: years.map(val), backgroundColor: cssVar('--accent'), hoverBackgroundColor: cssVar('--passport'), borderRadius: 6, maxBarThickness: 46 }] },
+      options: {
+        responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => `${fmtInt(c.raw)} ${{ flights: 'vols', km: 'km', hours: 'h' }[yearMode]}` } } },
+        scales: {
+          x: { ticks: { color: cssVar('--text3'), font: { family: 'IBM Plex Mono' } }, grid: { display: false } },
+          y: { ticks: { color: cssVar('--text3'), precision: 0, callback: v => fmtInt(v) }, grid: { color: cssVar('--border') }, border: { display: false }, beginAtZero: true }
+        }
       }
-    };
-    charts.push(new Chart($('chart-year'), { type: 'bar', data: { labels: years, datasets: [{ label: 'Vols', data: years.map(y => byYear[y]), backgroundColor: cssVar('--accent'), borderRadius: 6 }] }, options: opts }));
-    charts.push(new Chart($('chart-dist'), { type: 'bar', data: { labels: years, datasets: [{ label: 'km', data: years.map(y => distByYear[y] || 0), backgroundColor: cssVar('--green'), borderRadius: 6 }] }, options: opts }));
+    }));
   }
 
   const bar = (n, max, color) => `<div class="bar-wrap"><div class="bar" style="width:${(n / max * 100).toFixed(0)}%;background:${color}"></div></div>`;
   $('top-airports').innerHTML = topAirports.map(([c, n], i) => `<li>
       <span class="rank">${i + 1}</span>
-      <span style="font-weight:600;color:var(--accent2)">${esc(c)}</span>
-      <span style="color:var(--text3);font-size:11px">${esc(AIRPORTS[c]?.city || '')}</span>
+      <span class="rk-code">${esc(c)}</span>
+      <span class="rk-name">${esc(AIRPORTS[c]?.city || '')}</span>
       ${bar(n, topAirports[0][1], 'var(--accent)')}<span class="count">${n}</span>
     </li>`).join('');
   $('top-routes').innerHTML = topRoutes.map(([key, n], i) => {
     const [a, b] = key.split('↔');
     return `<li>
       <span class="rank">${i + 1}</span>
-      <span style="font-weight:600;color:var(--accent2);white-space:nowrap">${esc(a)} ↔ ${esc(b)}</span>
-      <span style="color:var(--text3);font-size:11px">${esc(city(a))} · ${esc(city(b))}</span>
-      ${bar(n, topRoutes[0][1], 'var(--yellow)')}<span class="count">${n}×</span>
+      <span class="rk-code">${esc(a)} ↔ ${esc(b)}</span>
+      <span class="rk-name">${esc(city(a))} · ${esc(city(b))}</span>
+      ${bar(n, topRoutes[0][1], 'var(--yellow)')}<span class="count">${n}</span>
     </li>`;
   }).join('');
   const simple = (id, data, color) => {
     if ($(id)) $(id).innerHTML = data.map(([name, n], i) => `<li>
-      <span class="rank">${i + 1}</span><span style="flex:1">${esc(name)}</span>
+      <span class="rank">${i + 1}</span><span class="rk-name rk-main">${esc(name)}</span>
       ${bar(n, data[0][1], color)}<span class="count">${n}</span>
     </li>`).join('');
   };
@@ -1571,19 +1620,18 @@ function renderSeatSummary() {
   const el = $('seat-summary');
   const seated = flights.map(f => ({ f, s: seatPosition(f) })).filter(x => x.s);
   if (!seated.length) {
-    el.innerHTML = '<p style="color:var(--text3);font-size:13px;padding:8px 0">Aucun siège enregistré. Ajoutez le numéro de siège (ex. 14A) dans vos vols.</p>';
+    el.innerHTML = '<p class="muted" style="padding:8px 0">Aucun siège enregistré. Ajoutez le numéro de siège (ex. 14A) dans vos vols.</p>';
     return;
   }
   const count = { window: 0, middle: 0, aisle: 0 };
   seated.forEach(x => { if (x.s.pos) count[x.s.pos]++; });
   const classified = count.window + count.middle + count.aisle;
   const pct = n => classified ? Math.round(n / classified * 100) : 0;
-  const tile = (key, icon, label) => `<div class="seat-tile seat-${key}">
-      <div class="seat-icon">${icon}</div>
-      <div class="seat-n">${count[key]}</div>
+  const best = Object.entries(count).sort((a, b) => b[1] - a[1])[0][0];
+  // A row of seats seen from above: window, middle, aisle, then the aisle itself
+  const seat = (key, label) => `<div class="seat seat-${key}${key === best ? ' best' : ''}">
+      <div class="seat-shape"><b>${count[key]}</b><span>${pct(count[key])} %</span></div>
       <div class="seat-label">${label}</div>
-      <div class="seat-bar"><div style="width:${pct(count[key])}%"></div></div>
-      <div class="seat-pct">${pct(count[key])} %</div>
     </div>`;
 
   const bySeat = {};
@@ -1594,17 +1642,19 @@ function renderSeatSummary() {
   const missing = flights.length - seated.length;
   const unclassified = seated.length - classified;
 
-  el.innerHTML = `<div class="seat-tiles">
-      ${tile('window', '🪟', 'côté hublot')}
-      ${tile('middle', '💺', 'au milieu')}
-      ${tile('aisle', '🚶', 'côté couloir')}
+  el.innerHTML = `<div class="seat-row">
+      <div class="seat-window-frame" aria-hidden="true"></div>
+      ${seat('window', 'côté hublot')}
+      ${seat('middle', 'au milieu')}
+      ${seat('aisle', 'côté couloir')}
+      <div class="seat-aisle-gap" aria-hidden="true"><span>couloir</span></div>
     </div>
-    <ul class="seat-facts">
-      <li>Siège le plus fréquent : <b>${esc(favSeat)}</b>${favN > 1 ? ` (${favN} fois)` : ''}</li>
-      <li>Rang moyen : <b>${avgRow}</b> (le plus à l'avant : ${Math.min(...rows)}, le plus à l'arrière : ${Math.max(...rows)})</li>
-      ${missing ? `<li>${plural(missing, 'vol', 'vols')} sans siège enregistré</li>` : ''}
-      ${unclassified ? `<li>${plural(unclassified, 'siège non classé', 'sièges non classés')} (lettre inattendue pour ce type d'avion)</li>` : ''}
-    </ul>
+    <div class="seat-kpis">
+      <div><span>Siège le plus fréquent</span><b class="mono">${esc(favSeat)}</b><small>${favN > 1 ? `${favN} fois` : ''}</small></div>
+      <div><span>Rang moyen</span><b class="mono">${avgRow}</b><small>de ${Math.min(...rows)} à ${Math.max(...rows)}</small></div>
+      <div><span>Sièges connus</span><b class="mono">${seated.length}</b><small>${missing ? `${plural(missing, 'vol', 'vols')} sans siège` : 'tous les vols'}</small></div>
+    </div>
+    ${unclassified ? `<p class="seat-note">${plural(unclassified, 'siège non classé', 'sièges non classés')} (lettre inattendue pour ce type d'avion).</p>` : ''}
     <p class="seat-note">La position dépend de la cabine : sur un Embraer, la lettre B est côté couloir ; sur un Boeing 737, c'est la place du milieu.</p>`;
 }
 
@@ -2304,6 +2354,10 @@ $('passport').addEventListener('click', e => {
 $('stat-popup-body').addEventListener('click', e => {
   const b = e.target.closest('[data-set-status]');
   if (b && $('stat-popup-body').dataset.country) setCountryStatus($('stat-popup-body').dataset.country, b.dataset.setStatus);
+});
+$('charts-container').addEventListener('click', e => {
+  const b = e.target.closest('[data-year-mode]');
+  if (b && b.dataset.yearMode !== yearMode) { yearMode = b.dataset.yearMode; renderAnalytics(); }
 });
 $('flights-table').addEventListener('click', e => {
   const item = e.target.closest('.fl');
