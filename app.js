@@ -1375,11 +1375,8 @@ function buildTrips() {
   });
 }
 
-let journalObserver = null;
-
 function renderJournal() {
   const el = $('journal');
-  if (journalObserver) { journalObserver.disconnect(); journalObserver = null; }
   if (!flights.length) {
     el.innerHTML = '<div class="empty-state"><div class="emoji">📔</div><p>Aucun vol pour l\'instant.</p><button class="btn btn-primary" onclick="openModal()">+ Ajouter le premier vol</button></div>';
     return;
@@ -1404,11 +1401,10 @@ function renderJournal() {
           </div>
           <ol class="j-flights">${t.flights.map(f => `<li class="pass j-flight" data-flight="${esc(f.id)}" tabindex="0" role="button" aria-label="Voir le vol ${esc(f.from)} vers ${esc(f.to)} du ${formatDate(f.date)}">
               <div class="pass-main">
-                <div class="pass-top"><span>${formatDate(f.date)}${f.departureTime ? ' · ' + esc(f.departureTime) : ''}</span><span>${esc([f.airline, f.flightNumber].filter(Boolean).join(' '))}</span></div>
+                <div class="pass-top"><span>${formatDate(f.date)}${f.departureTime ? ' · ' + esc(f.departureTime) : ''}${f.photo ? ' <span class="has-photo" title="Photo dans la fiche du vol" aria-label="avec photo">📷</span>' : ''}</span><span>${esc([f.airline, f.flightNumber].filter(Boolean).join(' '))}</span></div>
                 <div class="pass-route"><b>${esc(f.from)}</b><span class="line"></span><b>${esc(f.to)}</b></div>
                 <div class="pass-cities"><span>${esc(city(f.from))}</span><span>${esc(city(f.to))}</span></div>
                 ${f.notes ? `<p class="j-notes">${esc(f.notes)}</p>` : ''}
-                ${f.photo ? `<div class="j-photo" data-photo="${esc(f.photo)}"></div>` : ''}
               </div>
               <div class="stub">
                 <div><div class="k">siège</div><div class="v">${esc(f.seat || '–')}</div></div>
@@ -1419,22 +1415,6 @@ function renderJournal() {
         </article>`;
       }).join('')}`;
   }).join('');
-
-  // Photos are downloaded only when they come into view
-  const load = box => {
-    photoURL(box.dataset.photo).then(url => {
-      const img = new Image();
-      img.alt = 'Photo du vol'; img.loading = 'lazy'; img.src = url;
-      box.replaceChildren(img);
-    }).catch(() => { box.innerHTML = '<div class="j-empty-photo">Photo indisponible</div>'; });
-  };
-  const boxes = el.querySelectorAll('.j-photo');
-  if ('IntersectionObserver' in window) {
-    journalObserver = new IntersectionObserver(entries => entries.forEach(e => {
-      if (e.isIntersecting) { journalObserver.unobserve(e.target); load(e.target); }
-    }), { rootMargin: '400px' });
-    boxes.forEach(b => journalObserver.observe(b));
-  } else boxes.forEach(load);
 }
 
 // ═══════════════════════════════════════
