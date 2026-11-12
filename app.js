@@ -534,16 +534,25 @@ function miniWorldPaths() {
   const X = lon => ((lon - MINI.x0) * MINI.k).toFixed(1), Y = lat => ((MINI.y0 - lat) * MINI.k).toFixed(1);
   miniWorld = WORLD.countries.map(c => {
     let d = '';
+    let biggest = null;   // largest ring of the country, kept even when simplification removes everything
     c.r.forEach(r => {
-      let x = 0, y = 0, lx = null, ly = null, ring = '', n = 0;
+      let x = 0, y = 0, lx = null, ly = null, ring = '', n = 0, minX = 1e9, maxX = -1e9, minY = 1e9, maxY = -1e9;
       for (let i = 0; i < r.length; i += 2) {
         x += r[i]; y += r[i + 1];
         const lon = x / 100, lat = y / 100;
+        minX = Math.min(minX, lon); maxX = Math.max(maxX, lon); minY = Math.min(minY, lat); maxY = Math.max(maxY, lat);
         // keep a point only when it moved at least 0.7 degree: plenty for a 360 px wide map
         if (lx === null || Math.abs(lon - lx) + Math.abs(lat - ly) >= 0.7) { ring += (n ? 'L' : 'M') + X(lon) + ' ' + Y(lat); lx = lon; ly = lat; n++; }
       }
       if (n >= 3) d += ring + 'Z';
+      const size = (maxX - minX) + (maxY - minY);
+      if (!biggest || size > biggest.size) biggest = { size, cx: (minX + maxX) / 2, cy: (minY + maxY) / 2 };
     });
+    // A country too small to survive (Singapore, Malta…) becomes a small diamond so it can still be coloured
+    if (!d && biggest) {
+      const r = 0.9;
+      d = `M${X(biggest.cx)} ${Y(biggest.cy + r)}L${X(biggest.cx + r)} ${Y(biggest.cy)}L${X(biggest.cx)} ${Y(biggest.cy - r)}L${X(biggest.cx - r)} ${Y(biggest.cy)}Z`;
+    }
     return { cc: c.c || '', d };
   }).filter(p => p.d);
   return miniWorld;
