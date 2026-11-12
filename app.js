@@ -751,6 +751,7 @@ async function openFlightDetail(flightId) {
     <div class="detail-actions">
       <button class="btn btn-ghost" onclick="closeModal('detail-modal')">Fermer</button>
       <button class="btn btn-secondary" onclick="closeModal('detail-modal');openModal('${f.id}')">Modifier</button>
+      <button class="btn btn-primary" onclick="closeModal('detail-modal');openReturnFlight('${f.id}')" title="Nouveau vol ${esc(f.to)} → ${esc(f.from)}, prérempli">↩ Vol retour</button>
       <button class="btn btn-danger" style="margin-left:auto" onclick="deleteFlight('${f.id}')">Supprimer</button>
     </div>`;
   $('detail-modal').classList.add('open');
@@ -1192,7 +1193,8 @@ function openModal(id) {
   $('flight-form').reset();
   ['from-code', 'to-code'].forEach(i => { $(i).value = ''; });
   ['from-list', 'to-list'].forEach(i => $(i).classList.remove('open'));
-  setHint('duration-hint', ''); setHint('reg-status', '');
+  setHint('duration-hint', ''); setHint('reg-status', ''); setHint('date-hint', '');
+  $('flight-date').removeAttribute('min');
   $('remove-photo').value = '0';
   $('photo-preview').innerHTML = '';
   $('photo-filename').textContent = '';
@@ -1228,6 +1230,35 @@ function openModal(id) {
     $('aircraft-type').dataset.auto = '1';
   }
   $('flight-modal').classList.add('open');
+}
+
+// New flight in the other direction: airports swapped; airline, class and
+// travel companions copied. Date, times, flight number, aircraft, seat and
+// notes stay empty because they change on the way back.
+function openReturnFlight(id) {
+  const f = flights.find(x => x.id === id);
+  if (!f) return;
+  openModal();
+  $('modal-title').textContent = `Vol retour ${f.to} → ${f.from}`;
+  $('from-input').value = airportLabel(f.to); $('from-code').value = f.to;
+  $('to-input').value = airportLabel(f.from); $('to-code').value = f.from;
+  $('airline').value = f.airline;
+  $('cabin-class').value = f.cabinClass;
+  $('co-travelers').value = f.coTravelers;
+
+  // The date is required and left empty on purpose, so it cannot be saved with a wrong date by mistake
+  const outbound = f.arrivalDate || f.date;
+  $('flight-date').value = '';
+  $('flight-date').min = outbound;
+  const existing = flights
+    .filter(x => x.from === f.to && x.to === f.from && x.date >= outbound)
+    .sort((a, b) => a.date.localeCompare(b.date))[0];
+  if (existing && existing.date <= addDays(outbound, 90)) {
+    setHint('date-hint', `Attention : un vol ${existing.from} → ${existing.to} existe déjà le ${formatDate(existing.date)}.`, 'red');
+  } else {
+    setHint('date-hint', `Aller le ${formatDate(f.date)}. Indiquez la date du retour.`);
+  }
+  setTimeout(() => $('flight-date').focus(), 50);
 }
 
 function closeModal(id) { $(id).classList.remove('open'); if (id === 'detail-modal') detailId = null; }
