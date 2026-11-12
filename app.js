@@ -17,7 +17,6 @@ let cfg = null;
 let flights = [];
 let countryStatus = {};               // passport: country code -> 'visited' | 'stopover' | 'land'
 let dataSha = null;                  // version of flights.json this device last saw
-let sortKey = 'date', sortDir = 1;
 let saving = false;
 
 const $ = id => document.getElementById(id);
@@ -735,75 +734,96 @@ function showDistancePopup() {
 // ═══════════════════════════════════════
 //  FLIGHTS TABLE
 // ═══════════════════════════════════════
+// "Mes vols": every flight as a compact ticket, grouped by year when sorted by date.
+const SORTS = {
+  'date-desc': { label: 'Plus récents d\'abord', val: f => f.date + f.departureTime, dir: -1, byYear: true },
+  'date-asc': { label: 'Plus anciens d\'abord', val: f => f.date + f.departureTime, dir: 1, byYear: true },
+  'dist-desc': { label: 'Plus longue distance', val: f => f.distKm || 0, dir: -1 },
+  'dur-desc': { label: 'Plus longue durée', val: f => f.durationMin || 0, dir: -1 },
+  'airline-asc': { label: 'Compagnie (A → Z)', val: f => norm(f.airline) + f.date, dir: 1 },
+  'co2-desc': { label: 'Plus de CO₂e', val: f => co2Of(f), dir: -1 }
+};
+let sortMode = 'date-desc';
+const MONTH_FR = new Intl.DateTimeFormat('fr-FR', { month: 'short' });
+function monthShort(iso) { return MONTH_FR.format(new Date(iso + 'T12:00:00Z')).replace('.', ''); }
+
+function flightTicket(f, showYear) {
+  const meta = [f.aircraftType, f.registration].filter(Boolean).join(' · ');
+  return `<li class="fl" data-flight="${esc(f.id)}" tabindex="0" role="button" aria-label="Voir le vol ${esc(f.from)} vers ${esc(f.to)} du ${formatDate(f.date)}">
+    <div class="fl-date"><b>${esc(f.date.slice(8, 10))}</b><span>${esc(monthShort(f.date))}${showYear ? ' ' + esc(f.date.slice(0, 4)) : ''}</span></div>
+    <div class="fl-route">
+      <div class="fl-codes">${esc(f.from)}<i aria-hidden="true">✈</i>${esc(f.to)}</div>
+      <div class="fl-sub">${esc(city(f.from))} → ${esc(city(f.to))}</div>
+    </div>
+    <div class="fl-air">
+      <div>${esc(f.airline || '–')}${f.flightNumber ? ` <span class="fl-mono">${esc(f.flightNumber)}</span>` : ''}</div>
+      <div class="fl-sub">${esc(meta || ' ')}</div>
+    </div>
+    <div class="fl-num">
+      <div>${formatDist(f.distKm)}</div>
+      <div class="fl-sub">${f.durationMin ? fmtDur(f.durationMin) : '–'}</div>
+    </div>
+    <div class="fl-tags">${f.cabinClass !== 'economy' ? classBadge(f.cabinClass) : ''}<span class="fl-ph">${f.photo ? '<span class="has-photo" title="Photo dans la fiche du vol" aria-label="avec photo">📷</span>' : ''}</span><span class="fl-seat-slot">${f.seat ? `<span class="fl-seat" title="Siège">${esc(f.seat)}</span>` : ''}</span></div>
+  </li>`;
+}
+
 function renderFlightsTable() {
   updateYearFilter();
-  // The class column and filter appear only when the logbook has more than one class
+  // The class filter appears only when the logbook has more than one class
   const multiClass = new Set(flights.map(f => f.cabinClass)).size > 1;
   $('filter-class').hidden = !multiClass;
   if (!multiClass) $('filter-class').value = '';
+  if (!SORTS[$('sort-select').value]) $('sort-select').value = sortMode;
+  sortMode = $('sort-select').value;
   const search = norm($('search-input').value);
   const year = $('filter-year').value, cls = $('filter-class').value;
 
   const filtered = flights.filter(f => {
     const a = AIRPORTS[f.from] || {}, b = AIRPORTS[f.to] || {};
-    const str = norm([f.from, f.to, f.airline, f.flightNumber, f.registration, f.aircraftType, a.city, b.city, a.name, b.name].join(' '));
+    const str = norm([f.from, f.to, f.airline, f.flightNumber, f.registration, f.aircraftType, a.city, b.city, a.name, b.name, f.coTravelers].join(' '));
     if (search && !str.includes(search)) return false;
     if (year && !f.date.startsWith(year)) return false;
     if (cls && f.cabinClass !== cls) return false;
     return true;
   });
+  const sort = SORTS[sortMode];
+  filtered.sort((a, b) => { const va = sort.val(a), vb = sort.val(b); return va < vb ? -sort.dir : va > vb ? sort.dir : 0; });
 
-  const val = f => sortKey === 'distKm' ? (f.distKm || 0)
-    : sortKey === 'co2kg' ? co2Of(f)
-    : sortKey === 'date' ? f.date + f.departureTime
-    : norm(f[sortKey]);
-  filtered.sort((a, b) => { const va = val(a), vb = val(b); return va < vb ? sortDir : va > vb ? -sortDir : 0; });
+  const km = filtered.reduce((s, f) => s + (f.distKm || 0), 0);
+  $('flights-count').textContent = flights.length
+    ? `${plural(filtered.length, 'vol', 'vols')}${filtered.length !== flights.length ? ` sur ${flights.length}` : ''} · ${fmtInt(km)} km`
+    : '';
 
-  const tbl = $('flights-table');
+  const box = $('flights-table');
   if (!flights.length) {
-    tbl.innerHTML = '<div class="empty-state"><div class="emoji">✈️</div><p>Aucun vol pour l\'instant.</p><button class="btn btn-primary" onclick="openModal()">+ Ajouter le premier vol</button></div>';
+    box.innerHTML = '<div class="empty-state"><div class="emoji">✈️</div><p>Aucun vol pour l\'instant.</p><button class="btn btn-primary" onclick="openModal()">+ Ajouter le premier vol</button></div>';
     return;
   }
   if (!filtered.length) {
-    tbl.innerHTML = '<div class="empty-state"><div class="emoji">🔍</div><p>Aucun vol ne correspond à ces filtres.</p></div>';
+    box.innerHTML = '<div class="empty-state"><div class="emoji">🔍</div><p>Aucun vol ne correspond à ces filtres.</p></div>';
     return;
   }
-  const col = (key, label, cls = '') => `<th class="${cls}" onclick="sortBy('${key}')">${label}${sortKey === key ? (sortDir === 1 ? ' ↓' : ' ↑') : ''}</th>`;
-  tbl.innerHTML = `<table>
-    <thead><tr>
-      ${col('date', 'Date')}
-      <th>Trajet</th>
-      ${col('airline', 'Compagnie')}
-      <th class="col-wide">Avion</th>
-      ${col('distKm', 'Distance')}
-      ${col('co2kg', 'CO₂e', 'col-wide')}
-      ${multiClass ? '<th class="col-wide">Classe</th>' : ''}
-    </tr></thead>
-    <tbody>${filtered.map(f => `<tr class="flight-row" tabindex="0" onclick="openFlightDetail('${f.id}')" onkeydown="if(event.key==='Enter')openFlightDetail('${f.id}')" title="Voir, modifier ou supprimer ce vol">
-      <td class="nowrap">${formatDate(f.date)}</td>
-      <td>
-        <div class="route">${esc(f.from || '?')} → ${esc(f.to || '?')}</div>
-        <div class="route-detail">${esc(city(f.from))} → ${esc(city(f.to))}${f.durationMin ? ' · ' + fmtDur(f.durationMin) : ''}</div>
-      </td>
-      <td>${esc(f.airline || '–')} ${f.flightNumber ? `<span style="color:var(--text3);font-size:11px">${esc(f.flightNumber)}</span>` : ''}</td>
-      <td class="col-wide"><div style="font-size:13px">${esc(f.aircraftType || '–')}</div>${f.registration ? `<div style="font-size:11px;color:var(--text3)">${esc(f.registration)}</div>` : ''}</td>
-      <td class="nowrap">${formatDist(f.distKm)}</td>
-      <td class="co2-cell col-wide">${formatCO2(co2Of(f))}</td>
-      ${multiClass ? `<td class="col-wide">${classBadge(f.cabinClass)}</td>` : ''}
-    </tr>`).join('')}</tbody>
-  </table>`;
-}
-
-function sortBy(key) {
-  if (sortKey === key) sortDir *= -1; else { sortKey = key; sortDir = 1; }
-  renderFlightsTable();
+  if (sort.byYear) {
+    const groups = [];
+    filtered.forEach(f => {
+      const y = f.date.slice(0, 4);
+      if (!groups.length || groups[groups.length - 1].year !== y) groups.push({ year: y, list: [] });
+      groups[groups.length - 1].list.push(f);
+    });
+    box.innerHTML = groups.map(g => `<section class="fl-year">
+        <div class="fl-year-head"><h2>${esc(g.year)}</h2><span>${plural(g.list.length, 'vol', 'vols')} · ${fmtInt(g.list.reduce((s, f) => s + (f.distKm || 0), 0))} km</span></div>
+        <ol class="fl-list">${g.list.map(f => flightTicket(f, false)).join('')}</ol>
+      </section>`).join('');
+  } else {
+    box.innerHTML = `<ol class="fl-list">${filtered.map(f => flightTicket(f, true)).join('')}</ol>`;
+  }
 }
 
 function updateYearFilter() {
   const sel = $('filter-year');
   const years = [...new Set(flights.map(f => f.date.slice(0, 4)).filter(Boolean))].sort().reverse();
   const cur = sel.value;
-  sel.innerHTML = '<option value="">Toutes les années</option>' + years.map(y => `<option value="${esc(y)}" ${cur === y ? 'selected' : ''}>${esc(y)}</option>`).join('');
+  sel.innerHTML = '<option value="">Toutes années</option>' + years.map(y => `<option value="${esc(y)}" ${cur === y ? 'selected' : ''}>${esc(y)}</option>`).join('');
 }
 
 // ═══════════════════════════════════════
@@ -2284,6 +2304,14 @@ $('passport').addEventListener('click', e => {
 $('stat-popup-body').addEventListener('click', e => {
   const b = e.target.closest('[data-set-status]');
   if (b && $('stat-popup-body').dataset.country) setCountryStatus($('stat-popup-body').dataset.country, b.dataset.setStatus);
+});
+$('flights-table').addEventListener('click', e => {
+  const item = e.target.closest('.fl');
+  if (item) openFlightDetail(item.dataset.flight);
+});
+$('flights-table').addEventListener('keydown', e => {
+  const item = e.target.closest('.fl');
+  if (item && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); openFlightDetail(item.dataset.flight); }
 });
 $('journal').addEventListener('click', e => {
   const item = e.target.closest('.j-flight');

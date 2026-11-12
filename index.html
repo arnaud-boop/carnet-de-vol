@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="robots" content="noindex, nofollow">
   <!-- Version du site : la changer ici ET dans version.txt a chaque mise a jour -->
-  <meta name="app-version" content="2026-11-12.12">
+  <meta name="app-version" content="2026-11-12.13">
   <title>Carnet de vol</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9C%88%EF%B8%8F%3C/text%3E%3C/svg%3E">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/maplibre-gl/5.24.0/maplibre-gl.css">
@@ -184,6 +184,35 @@
     .empty-state p{font-size:15px;margin-bottom:20px;}
     .co2-cell{font-size:12px;color:var(--green);white-space:nowrap;}
     .nowrap{white-space:nowrap;}
+
+    /* Mes vols: compact tickets */
+    .flights{max-width:980px;margin:0 auto;}
+    .fl-head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap;margin:4px 0 14px;}
+    .fl-title{font-family:var(--serif);font-size:34px;font-weight:600;letter-spacing:-.6px;line-height:1.1;}
+    .fl-year{margin-bottom:26px;}
+    .fl-year-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin:0 2px 10px;}
+    .fl-year-head h2{font-family:var(--serif);font-size:26px;font-weight:600;letter-spacing:-.4px;}
+    .fl-year-head span{font-size:12px;color:var(--text3);}
+    .fl-list{list-style:none;background:var(--card);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;}
+    .fl{display:grid;grid-template-columns:62px minmax(0,1.3fr) minmax(0,1.4fr) 92px auto;align-items:center;gap:0 16px;padding:0 16px 0 0;cursor:pointer;transition:background .12s;}
+    .fl + .fl{border-top:1px dashed var(--border);}
+    .fl:hover,.fl:focus-visible{background:var(--hover);outline:none;}
+    .fl-date{align-self:stretch;display:flex;flex-direction:column;align-items:center;justify-content:center;background:var(--stub);border-right:2px dashed var(--border);padding:10px 4px;line-height:1.1;text-align:center;}
+    .fl-date b{font:500 20px var(--mono);color:var(--accent2);}
+    .fl-date span{font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:.04em;}
+    .fl-route,.fl-air,.fl-num{padding:11px 0;min-width:0;}
+    .fl-codes{font:500 18px var(--mono);letter-spacing:-.3px;white-space:nowrap;}
+    .fl-codes i{font-style:normal;color:var(--accent);font-size:13px;margin:0 8px;font-family:var(--sans);}
+    .fl-sub{font-size:12px;color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+    .fl-air > div:first-child{font-size:14px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+    .fl-mono{font-family:var(--mono);font-size:12px;color:var(--text3);}
+    .fl-num{text-align:right;font-size:14px;font-variant-numeric:tabular-nums;white-space:nowrap;}
+    .fl-tags{display:flex;align-items:center;gap:6px;justify-content:flex-end;}
+    .fl-ph{width:18px;text-align:center;}
+    .fl-seat-slot{width:40px;text-align:right;}
+    .fl-seat{font:500 12px var(--mono);color:var(--accent2);background:var(--accent-bg);border-radius:6px;padding:2px 6px;}
+    .fl-tags .has-photo{margin:0;}
+    .filter-bar input[type=search]{-webkit-appearance:none;appearance:none;}
 
     /* Filter */
     .filter-bar{display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap;align-items:center;}
@@ -421,6 +450,17 @@
       .stub{width:auto;flex-direction:row;justify-content:space-around;border-left:none;border-top:2px dashed var(--border);border-radius:0 0 15px 15px;padding:10px 8px;}
       .pass::before,.pass::after{display:none;}
       .map-legend{left:auto;right:10px;bottom:auto;top:10px;flex-direction:column;gap:4px;}
+      .fl{grid-template-columns:54px minmax(0,1fr) auto;grid-template-areas:"date route num" "date air tags";gap:0 12px;padding-right:12px;}
+      .fl-date{grid-area:date;}
+      .fl-route{grid-area:route;padding:10px 0 0;}
+      .fl-air{grid-area:air;padding:2px 0 10px;}
+      .fl-air > div:first-child{font-size:13px;}
+      .fl-num{grid-area:num;padding:10px 0 0;font-size:13px;}
+      .fl-tags{grid-area:tags;padding-bottom:10px;min-width:0;}
+      .fl-codes{font-size:16px;}
+      .fl-title{font-size:28px;}
+      .filter-bar input[type=search]{flex-basis:100%;}
+      .filter-bar select{flex:1 1 0;min-width:0;}
       .pass-route b{font-size:24px;}
       .j-year h2{font-size:34px;}
       .j-trip-title{font-size:21px;}
@@ -521,20 +561,34 @@
   </div>
 
   <div class="view" id="view-flights">
-    <div class="filter-bar">
-      <input type="text" id="search-input" placeholder="Chercher un aéroport, une compagnie, une immatriculation…" oninput="renderFlightsTable()">
-      <select id="filter-year" onchange="renderFlightsTable()">
-        <option value="">Toutes les années</option>
-      </select>
-      <select id="filter-class" onchange="renderFlightsTable()">
-        <option value="">Toutes les classes</option>
-        <option value="economy">Économique</option>
-        <option value="premium">Premium Éco</option>
-        <option value="business">Affaires</option>
-        <option value="first">Première</option>
-      </select>
+    <div class="flights">
+      <div class="fl-head">
+        <h1 class="fl-title">Mes vols</h1>
+        <span class="muted" id="flights-count"></span>
+      </div>
+      <div class="filter-bar">
+        <input type="search" id="search-input" placeholder="Aéroport, ville, compagnie, avion, accompagnant…" oninput="renderFlightsTable()" aria-label="Chercher un vol">
+        <select id="filter-year" onchange="renderFlightsTable()" aria-label="Année">
+          <option value="">Toutes les années</option>
+        </select>
+        <select id="filter-class" onchange="renderFlightsTable()" aria-label="Classe">
+          <option value="">Toutes les classes</option>
+          <option value="economy">Économique</option>
+          <option value="premium">Premium Éco</option>
+          <option value="business">Affaires</option>
+          <option value="first">Première</option>
+        </select>
+        <select id="sort-select" onchange="renderFlightsTable()" aria-label="Trier">
+          <option value="date-desc">Plus récents</option>
+          <option value="date-asc">Plus anciens</option>
+          <option value="dist-desc">Distance</option>
+          <option value="dur-desc">Durée</option>
+          <option value="airline-asc">Compagnie</option>
+          <option value="co2-desc">CO₂e</option>
+        </select>
+      </div>
+      <div id="flights-table"></div>
     </div>
-    <div class="table-wrap" id="flights-table"></div>
   </div>
 
   <div class="view" id="view-journal">
