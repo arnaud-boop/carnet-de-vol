@@ -1035,7 +1035,7 @@ function initMap() {
       center: [15, 45], zoom: 2.5, minZoom: 0.6, maxZoom: 9,
       dragRotate: false, pitchWithRotate: false, touchPitch: false, maxPitch: 0,
       renderWorldCopies: true,
-      cooperativeGestures: coarsePointer(),   // on a phone: one finger scrolls the page, two fingers move the map
+      cooperativeGestures: false,   // one finger moves the map; on a phone the map is shorter so the page stays easy to scroll
       attributionControl: { compact: true, customAttribution: 'Fond : <a href="https://www.naturalearthdata.com" target="_blank" rel="noopener">Natural Earth</a>' },
       locale: {
         'NavigationControl.ZoomIn': 'Zoom avant', 'NavigationControl.ZoomOut': 'Zoom arrière',
@@ -1050,6 +1050,7 @@ function initMap() {
     mapgl = null;
     return false;
   }
+  mapgl.touchZoomRotate.disableRotation();   // pinch zooms, without turning the map
   mapgl.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-left');
   mapgl.addControl(new maplibregl.GlobeControl(), 'top-left');
   mapgl.addControl({
