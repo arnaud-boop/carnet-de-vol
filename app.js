@@ -3003,31 +3003,158 @@ function exportData() {
   showToast('📦 Fichier JSON exporté. Les photos restent dans le dépôt GitHub.');
 }
 
+// Runs fn on another logbook's data, then puts the open logbook back as it was
+function withDoc(name, doc, fn) {
+  const saved = { carnet, flights, routes, airlinesList, airportAirlines, historyUntil, countryStatus };
+  try {
+    carnet = name;
+    applyDoc(doc || { flights: [] });
+    return fn();
+  } finally {
+    ({ carnet, flights, routes, airlinesList, airportAirlines, historyUntil, countryStatus } = saved);
+  }
+}
+
+// The sheets of the logbook in memory: detailed flights, history routes, airports and countries
+function logbookSheets() {
+  const sheets = [];
+  if (flights.length) {
+    const rows = [...flights].sort((a, b) => (b.date + b.departureTime).localeCompare(a.date + a.departureTime)).map(f => ({
+      'Date': formatDate(f.date),
+      'Départ': f.from, 'Ville de départ': AIRPORTS[f.from]?.city || '',
+      'Arrivée': f.to, 'Ville d\'arrivée': AIRPORTS[f.to]?.city || '',
+      'Compagnie': f.airline, 'N° de vol': f.flightNumber,
+      'Immatriculation': f.registration, 'Type d\'avion': f.aircraftType,
+      'Classe': CABIN_LABEL[f.cabinClass] || '',
+      'Heure de départ': f.departureTime,
+      'Date d\'arrivée': f.arrivalDate ? formatDate(f.arrivalDate) : '',
+      'Heure d\'arrivée': f.arrivalTime,
+      'Durée': fmtDur(f.durationMin),
+      'Distance (km)': f.distKm || '',
+      'CO2 (kg)': co2Of(f) || '',
+      'Siège': f.seat, 'Voyagé avec': f.coTravelers, 'Notes': f.notes,
+      'Photo': f.photo ? f.photo.replace(/^photos\//, '') : ''
+    }));
+    sheets.push(['Vols', rows, [12, 8, 16, 8, 16, 20, 10, 14, 22, 14, 10, 12, 10, 10, 12, 10, 6, 22, 40, 24]]);
+  }
+  const legs = allLegs().sort((a, b) => b.n - a.n || b.km - a.km);
+  if (hasHistory()) {
+    const rows = legs.map(l => {
+      const r = routes.find(x => routeKey(x.from, x.to) === l.key);
+      const al = Object.entries(l.al).sort((p, q) => q[1].n - p[1].n);
+      return {
+        'Aéroport A': l.a, 'Ville A': city(l.a), 'Aéroport B': l.b, 'Ville B': city(l.b),
+        'Vols': l.n, 'Dont saisis en détail': l.flights,
+        'De A vers B': l.unk ? '' : l.ab, 'De B vers A': l.unk ? '' : l.ba,
+        'Répartition par sens': l.unk ? 'inconnue' : l.est ? 'estimée' : 'connue',
+        'Distance par vol (km)': l.km, 'Distance totale (km)': l.km * l.n,
+        'Durée estimée par vol': fmtDur(Math.round(estFlightMin(l.km))),
+        'Compagnies': al.map(([name, v]) => al.length > 1 || v.n < l.n ? `${name} ×${v.n}` : name).join(', '),
+        'Origine de la compagnie': !r || !(r.airline || r.airlineMix) ? (al.length ? 'saisie' : '') : r.airlineEst ? 'déduite (probable)' : 'déduite (certaine)'
+      };
+    });
+    sheets.push(['Trajets', rows, [8, 16, 8, 16, 6, 10, 8, 8, 12, 10, 12, 12, 34, 20]]);
+  }
+  const ap = {};
+  legs.forEach(l => {
+    const one = (c, out, inn) => { const x = ap[c] = ap[c] || { n: 0, out: 0, inn: 0, unk: false }; x.n += l.n; x.out += out; x.inn += inn; if (l.unk) x.unk = true; };
+    if (l.a === l.b) one(l.a, l.n, l.n);
+    else { one(l.a, l.ab, l.ba); one(l.b, l.ba, l.ab); }
+  });
+  const alAt = {};
+  Object.entries(airportAirlines).forEach(([c, list]) => { alAt[c] = new Set(list); });
+  flights.forEach(f => { if (f.airline) [f.from, f.to].forEach(c => (alAt[c] = alAt[c] || new Set()).add(f.airline)); });
+  sheets.push(['Aéroports', Object.entries(ap).sort((p, q) => q[1].n - p[1].n).map(([c, x]) => ({
+    'Code': c, 'Nom': AIRPORTS[c]?.name || '', 'Ville': AIRPORTS[c]?.city || '', 'Pays': countryName(AIRPORTS[c]?.country || ''),
+    'Latitude': AIRPORTS[c]?.lat ?? '', 'Longitude': AIRPORTS[c]?.lon ?? '',
+    'Passages': x.n, 'Décollages': x.unk ? '' : x.out, 'Atterrissages': x.unk ? '' : x.inn,
+    'Compagnies': [...(alAt[c] || [])].join(', ')
+  })), [8, 40, 18, 18, 10, 10, 9, 10, 12, 60]]);
+  const ci = countryInfo();
+  sheets.push(['Pays', [...ci.visited, ...ci.stopover].map(r => ({
+    'Pays': countryName(r.cc), 'Code': r.cc, 'Statut': STATUS_LABEL[r.status] || r.status,
+    'Statut choisi à la main': r.overridden ? 'oui' : '', 'Vols': r.n || ''
+  })), [24, 6, 20, 12, 8]]);
+  return sheets;
+}
+
+function addSheets(wb, sheets, prefix = '') {
+  sheets.forEach(([name, rows, widths]) => {
+    const ws = XLSX.utils.json_to_sheet(rows);
+    ws['!cols'] = widths.map(wch => ({ wch }));
+    XLSX.utils.book_append_sheet(wb, ws, (prefix + name).slice(0, 31));
+  });
+}
+
 async function exportExcel() {
-  if (!flights.length) { showToast('Aucun vol à exporter.', true); return; }
+  if (!flights.length && !hasHistory()) { showToast('Aucun vol à exporter.', true); return; }
   if (!await needXLSX()) return;
-  const rows = [...flights].sort((a, b) => (b.date + b.departureTime).localeCompare(a.date + a.departureTime)).map(f => ({
-    'Date': formatDate(f.date),
-    'Départ': f.from, 'Ville de départ': AIRPORTS[f.from]?.city || '',
-    'Arrivée': f.to, 'Ville d\'arrivée': AIRPORTS[f.to]?.city || '',
-    'Compagnie': f.airline, 'N° de vol': f.flightNumber,
-    'Immatriculation': f.registration, 'Type d\'avion': f.aircraftType,
-    'Classe': CABIN_LABEL[f.cabinClass] || '',
-    'Heure de départ': f.departureTime,
-    'Date d\'arrivée': f.arrivalDate ? formatDate(f.arrivalDate) : '',
-    'Heure d\'arrivée': f.arrivalTime,
-    'Durée': fmtDur(f.durationMin),
-    'Distance (km)': f.distKm || '',
-    'CO2 (kg)': co2Of(f) || '',
-    'Siège': f.seat, 'Voyagé avec': f.coTravelers, 'Notes': f.notes,
-    'Photo': f.photo ? 'oui' : ''
-  }));
-  const ws = XLSX.utils.json_to_sheet(rows);
-  ws['!cols'] = [12, 8, 16, 8, 16, 20, 10, 14, 22, 14, 10, 12, 10, 10, 12, 10, 6, 22, 40, 6].map(wch => ({ wch }));
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, 'Vols');
+  addSheets(wb, logbookSheets());
   XLSX.writeFile(wb, `carnet-de-vol-${carnet}-${todayISO()}.xlsx`);
   showToast('📊 Fichier Excel exporté (sans les photos).');
+}
+
+// ─── Full backup: both logbooks as saved on GitHub, every photo, and a readable Excel copy, in one ZIP file ───
+async function needJSZip() {
+  if (typeof JSZip !== 'undefined') return true;
+  try { await loadScript('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js'); return typeof JSZip !== 'undefined'; }
+  catch (e) { showToast('Le module ZIP ne se charge pas. Vérifiez la connexion internet.', true); return false; }
+}
+
+async function exportBackup() {
+  if (!cfg) return;
+  if (!await needJSZip() || !await needXLSX()) return;
+  setStatus('busy', 'Sauvegarde : lecture des carnets…');
+  try {
+    const zip = new JSZip();
+    const repo = zip.folder('depot-de-donnees');
+    const docs = {};
+    for (const name of Object.keys(CARNETS)) {
+      const { doc } = await queue(() => readDataFile(CARNETS[name].file));
+      if (!doc) continue;
+      docs[name] = doc;
+      repo.file(CARNETS[name].file, JSON.stringify(doc, null, 2) + '\n');
+    }
+    // Every file of the photos folder, including photos no flight uses any more
+    let list = [];
+    try { list = await (await ghFetch(ghUrl('photos') + refQuery())).json(); }
+    catch (e) { if (e.status !== 404) throw e; }
+    const files = (Array.isArray(list) ? list : []).filter(x => x.type === 'file');
+    for (let i = 0; i < files.length; i++) {
+      setStatus('busy', `Sauvegarde : photo ${i + 1} sur ${files.length}…`);
+      const r = await ghFetch(ghUrl(files[i].path) + refQuery(), {}, true);
+      repo.file(files[i].path, await r.arrayBuffer());
+    }
+    setStatus('busy', 'Sauvegarde : fichier Excel…');
+    const wb = XLSX.utils.book_new();
+    for (const [name, doc] of Object.entries(docs)) addSheets(wb, withDoc(name, doc, logbookSheets), CARNETS[name].label + ' - ');
+    zip.file('carnets-de-vol.xlsx', XLSX.write(wb, { bookType: 'xlsx', type: 'array' }));
+    const counts = Object.entries(docs).map(([name, doc]) => {
+      const n = (doc.flights || []).length, h = (doc.routes || []).reduce((s, r) => s + (r.count || 0), 0);
+      return `- Carnet ${CARNETS[name].of} : ${CARNETS[name].file}, ${n} vol(s) saisi(s)${h ? ` et ${h} vols d'historique` : ''}`;
+    });
+    zip.file('LISEZ-MOI.txt', [
+      `Sauvegarde du carnet de vol, faite le ${formatDate(todayISO())}.`,
+      '',
+      'carnets-de-vol.xlsx : une copie lisible de tous les carnets (vols, trajets, aéroports, pays).',
+      '',
+      'depot-de-donnees : une copie exacte du dépôt GitHub de données.',
+      ...counts,
+      `- photos : ${files.length} photo(s)`,
+      '',
+      'Pour tout restaurer : copier le contenu du dossier depot-de-donnees dans un dépôt GitHub privé,',
+      'puis connecter le site à ce dépôt. Pour un seul carnet : menu ☰, « Importer un fichier », avec le fichier JSON.',
+      ''
+    ].join('\r\n'));
+    const blob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
+    download(blob, `carnet-de-vol-sauvegarde-${todayISO()}.zip`);
+    setStatus('ok');
+    showToast(`💾 Sauvegarde complète : ${Object.keys(docs).length} carnets et ${files.length} photo(s).`);
+  } catch (e) {
+    setStatus('error', e.message);
+    showToast(`Sauvegarde impossible. ${e.message || ''}`, true);
+  }
 }
 
 function handleImport(input) {
