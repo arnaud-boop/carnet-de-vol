@@ -1680,6 +1680,24 @@ function renderMap() {
 
 // ─── Map tab: header, year filter and the four extreme airports ───
 const EXT_LABEL = { n: 'Le plus au nord', s: 'Le plus au sud', e: 'Le plus à l\'est', w: 'Le plus à l\'ouest' };
+// The farthest airports in each direction that have an IATA code and scheduled flights (OurAirports, November 2026)
+const EXT_MAX = {
+  n: { code: 'LYR', city: 'Longyearbyen', lat: 78.2461, lon: 15.4656 },
+  s: { code: 'USH', city: 'Ushuaia', lat: -54.8433, lon: -68.2958 },
+  e: { code: 'MFJ', city: 'Moala, Fidji', lat: -18.5667, lon: 179.951 },
+  w: { code: 'TVU', city: 'Taveuni, Fidji', lat: -16.6906, lon: -179.877 }
+};
+// How far the record of one direction is from the farthest possible airport
+function extRecordNote(k, a) {
+  const m = EXT_MAX[k];
+  const gap = { n: m.lat - a.lat, s: a.lat - m.lat, e: m.lon - a.lon, w: a.lon - m.lon }[k];
+  const deg = v => { const t = Math.abs(v).toFixed(1); return t === '180.0' ? '179.9' : t; };   // 179.95 shows as 179.9, not 180.0
+  const where = k === 'n' || k === 's' ? `${deg(m.lat)}°&nbsp;${m.lat >= 0 ? 'N' : 'S'}` : `${deg(m.lon)}°&nbsp;${m.lon >= 0 ? 'E' : 'O'}`;
+  const left = gap <= 0.05 ? 'record atteint !'
+    : k === 'n' || k === 's' ? `encore ${gap.toFixed(1)}°, environ ${fmtInt(Math.round(gap * 111.2 / 10) * 10)}&nbsp;km`
+    : `encore ${gap.toFixed(1)}° de longitude`;
+  return `<span class="ext-max">Record possible : ${esc(m.code)}, ${esc(m.city)}<span class="ext-left">${where} · ${left}</span></span>`;
+}
 function renderMapHeader() {
   const aps = usedAirports();
   const nRoutes = mapLegsAll().length;
@@ -1705,7 +1723,9 @@ function renderMapHeader() {
       <span class="ext-dir"><i aria-hidden="true">${arrow}</i>${EXT_LABEL[k]}</span>
       <b>${esc(code)}</b><span class="ext-city">${esc(city(code))}, ${esc(countryName(AIRPORTS[code].country))}</span>
       <span class="ext-coord">${coord(AIRPORTS[code])}</span>
+      ${extRecordNote(k, AIRPORTS[code])}
     </button>`).join('') : '';
+  $('map-extremes-note').hidden = !aps.length;
 }
 
 function focusAirport(code) {

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="robots" content="noindex, nofollow">
   <!-- Version du site : la changer ici ET dans version.txt a chaque mise a jour -->
-  <meta name="app-version" content="2026-11-13.27">
+  <meta name="app-version" content="2026-11-15.28">
   <title>Carnet de vol</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9C%88%EF%B8%8F%3C/text%3E%3C/svg%3E">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/maplibre-gl/5.24.0/maplibre-gl.css">
@@ -277,6 +277,9 @@
     .ext b{font:500 24px var(--mono);color:var(--accent2);margin-top:4px;}
     .ext-city{font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
     .ext-coord{font:500 11px var(--mono);color:var(--text3);}
+    .ext-max{font-size:11px;line-height:1.35;color:var(--text3);border-top:1px dashed var(--border);margin-top:8px;padding-top:7px;}
+    .ext-left{display:block;color:var(--text2);font-weight:600;}
+    .ext-note{font-size:12px;margin-top:10px;max-width:72ch;}
 
     /* Map */
     #map-container{position:relative;isolation:isolate;border-radius:18px;overflow:hidden;border:1px solid var(--border);}
@@ -714,6 +717,7 @@
     </div>
     <h2 class="sec-title" style="margin-top:26px">Points extrêmes</h2>
     <div class="extremes" id="map-extremes"></div>
+    <p class="muted ext-note" id="map-extremes-note" hidden>Record possible : l'aéroport le plus éloigné dans cette direction parmi ceux qui ont un code IATA et des vols réguliers (liste OurAirports). À l'est et à l'ouest, les deux records sont aux Fidji, de part et d'autre de la ligne de changement de date : la longitude ne mesure donc pas la distance parcourue.</p>
   </div>
 
   <div class="view" id="view-flights">
