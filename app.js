@@ -1696,7 +1696,14 @@ function extRecordNote(k, a) {
   const left = gap <= 0.05 ? 'record atteint !'
     : k === 'n' || k === 's' ? `encore ${gap.toFixed(1)}°, environ ${fmtInt(Math.round(gap * 111.2 / 10) * 10)}&nbsp;km`
     : `encore ${gap.toFixed(1)}° de longitude`;
-  return `<span class="ext-max">Record possible : ${esc(m.code)}, ${esc(m.city)}<span class="ext-left">${where} · ${left}</span></span>`;
+  // Share of the way from the equator (north, south) or the Greenwich meridian (east, west) to the possible record
+  const done = { n: a.lat / m.lat, s: a.lat / m.lat, e: a.lon / m.lon, w: a.lon / m.lon }[k];
+  const pct = Math.max(0, Math.min(100, Math.round(done * 100)));
+  const from = k === 'n' || k === 's' ? 'l\'équateur' : 'Greenwich';
+  return `<span class="ext-max">
+      <span class="ext-pct"><b>${pct} %</b> du chemin depuis ${from}</span>
+      <span class="ext-bar" aria-hidden="true"><i style="width:${pct}%"></i></span>
+      Record possible : ${esc(m.code)}, ${esc(m.city)}<span class="ext-left">${where} · ${left}</span></span>`;
 }
 function renderMapHeader() {
   const aps = usedAirports();
